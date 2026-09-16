@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CardCrop">
+<meta name="theme-color" content="#080808">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<title>CardCrop AI</title>
+<style>
+:root{--obsidian:#080808;--panel:#0c1210;--cyan:#00FFFF;--green:#00FF66;--dim-cyan:#0A3D3D;--phosphor:#EAFFFB;--text-dim:#5a8a7a;--glow-cyan:0 0 20px rgba(0,255,255,0.3),0 0 60px rgba(0,255,255,0.08);--glow-green:0 0 20px rgba(0,255,102,0.3);--mono:'Space Mono',monospace;--code:'JetBrains Mono',monospace;--radius:4px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html,body{font-family:var(--mono);background:var(--obsidian);color:var(--phosphor);min-height:100vh;min-height:100dvh;overflow-x:hidden;-webkit-font-smoothing:antialiased;font-size:13px;line-height:1.6}
+body{padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+body::after{content:'';position:fixed;inset:0;z-index:9999;pointer-events:none;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.08) 2px,rgba(0,0,0,0.08) 4px)}
+.app{max-width:480px;margin:0 auto;padding:12px 16px}
+.hdr{display:flex;align-items:baseline;justify-content:space-between;padding:16px 0 20px;border-bottom:1px solid var(--dim-cyan)}
+.hdr h1{font-size:18px;font-weight:700;color:var(--cyan);text-shadow:var(--glow-cyan);letter-spacing:1px}
+.hdr h1 em{font-style:normal;color:var(--green);text-shadow:var(--glow-green)}
+.hdr-ver{font-family:var(--code);font-size:10px;color:var(--dim-cyan)}
+.upload{margin-top:16px;border:1px solid var(--dim-cyan);border-radius:var(--radius);padding:32px 16px;text-align:center;cursor:pointer;background:var(--panel);transition:border-color 0.2s,box-shadow 0.2s;position:relative;overflow:hidden}
+.upload::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(0,255,255,0.03) 0%,transparent 70%);pointer-events:none}
+.upload:hover,.upload.over{border-color:var(--cyan);box-shadow:inset 0 0 30px rgba(0,255,255,0.05)}
+.upload input{display:none}
+.upload-prompt{font-family:var(--code);font-size:12px;color:var(--text-dim)}
+.upload-prompt b{color:var(--cyan)}
+.upload-cmd{margin-top:10px;font-family:var(--code);font-size:11px;color:var(--green);text-shadow:var(--glow-green)}
+.stats{display:flex;gap:1px;margin-top:16px;background:var(--dim-cyan);border-radius:var(--radius);overflow:hidden}
+.stat{flex:1;padding:10px 6px;background:var(--panel);text-align:center}
+.stat-n{font-family:var(--code);font-size:20px;font-weight:700;color:var(--cyan);text-shadow:var(--glow-cyan)}
+.stat-l{font-family:var(--code);font-size:9px;color:var(--text-dim);margin-top:2px;letter-spacing:0.5px}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:16px}
+.thumb{position:relative;border-radius:var(--radius);overflow:hidden;background:var(--panel);cursor:pointer;aspect-ratio:5/7;border:1px solid var(--dim-cyan);transition:border-color 0.2s}
+.thumb:hover{border-color:var(--cyan)}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.thumb .tag{position:absolute;top:5px;right:5px;padding:2px 6px;border-radius:2px;font-family:var(--code);font-size:9px;font-weight:700;letter-spacing:0.5px}
+.tag-ocr{background:rgba(0,255,255,0.85);color:#080808}
+.tag-enh{background:rgba(0,255,102,0.85);color:#080808}
+.tag-new{background:rgba(10,61,61,0.9);color:var(--cyan);border:1px solid var(--dim-cyan)}
+.thumb .name{position:absolute;bottom:0;left:0;right:0;padding:20px 6px 6px;font-family:var(--code);font-size:10px;font-weight:500;background:linear-gradient(transparent,rgba(8,8,8,0.9));color:var(--phosphor);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prog{margin-top:14px}
+.prog-track{height:4px;background:var(--panel);border-radius:2px;border:1px solid var(--dim-cyan);overflow:hidden}
+.prog-fill{height:100%;background:linear-gradient(90deg,var(--cyan),var(--green));border-radius:2px;transition:width 0.4s}
+.prog-info{display:flex;justify-content:space-between;margin-top:4px;font-family:var(--code);font-size:10px;color:var(--text-dim)}
+.empty{text-align:center;padding:48px 20px;color:var(--text-dim)}
+.empty-glyph{font-size:40px;opacity:0.3;margin-bottom:10px}
+.empty p{font-family:var(--code);font-size:11px;line-height:1.7}
+.overlay{position:fixed;inset:0;z-index:100;background:rgba(8,8,8,0.7);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);opacity:0;pointer-events:none;transition:opacity 0.2s}
+.overlay.on{opacity:1;pointer-events:auto}
+.panel{position:fixed;bottom:0;left:0;right:0;z-index:101;max-height:93vh;max-height:93dvh;background:var(--panel);border-top:1px solid var(--dim-cyan);border-radius:12px 12px 0 0;transform:translateY(100%);transition:transform 0.3s cubic-bezier(0.32,0.72,0,1);overflow-y:auto;overscroll-behavior:contain;padding-bottom:env(safe-area-inset-bottom)}
+.panel.on{transform:translateY(0)}
+.panel-handle{width:32px;height:3px;background:var(--dim-cyan);border-radius:2px;margin:8px auto 0}
+.tabs{display:flex;border-bottom:1px solid var(--dim-cyan);padding:0 12px}
+.tab{padding:10px 12px;font-family:var(--code);font-size:11px;font-weight:500;color:var(--text-dim);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;letter-spacing:0.3px}
+.tab.on{color:var(--cyan);border-bottom-color:var(--cyan)}
+.cmp{position:relative;width:100%;aspect-ratio:5/7;overflow:hidden;touch-action:none;user-select:none;background:#000}
+.cmp img{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;pointer-events:none}
+.cmp-clip{position:absolute;top:0;left:0;height:100%;overflow:hidden}
+.cmp-clip img{position:absolute;top:0;left:0;height:100%}
+.cmp-line{position:absolute;top:0;width:1px;height:100%;background:var(--cyan);z-index:5;box-shadow:var(--glow-cyan)}
+.cmp-dot{position:absolute;top:50%;transform:translate(-50%,-50%);width:24px;height:24px;border-radius:50%;border:2px solid var(--cyan);background:rgba(8,8,8,0.8);box-shadow:var(--glow-cyan);display:flex;align-items:center;justify-content:center;font-family:var(--code);font-size:9px;color:var(--cyan)}
+.cmp-lbl{position:absolute;top:6px;padding:2px 6px;background:rgba(8,8,8,0.7);border:1px solid var(--dim-cyan);font-family:var(--code);font-size:9px;color:var(--cyan);border-radius:2px;z-index:4}
+.meta{padding:12px 16px}
+.meta h3{font-family:var(--mono);font-size:12px;color:var(--green);margin-bottom:8px;letter-spacing:0.5px}
+.meta-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(10,61,61,0.4);font-family:var(--code);font-size:11px}
+.meta-row:last-child{border-bottom:none}
+.meta-k{color:var(--text-dim)}
+.meta-v{color:var(--phosphor);font-weight:500;text-align:right;max-width:60%}
+.bio{padding:12px 16px}
+.bio p{font-family:var(--code);font-size:12px;line-height:1.7;color:var(--phosphor)}
+.acts{display:flex;gap:8px;padding:12px 16px}
+.act{flex:1;padding:10px;border-radius:var(--radius);font-family:var(--code);font-size:11px;font-weight:700;border:none;cursor:pointer;text-align:center;letter-spacing:0.5px}
+.act-1{background:var(--cyan);color:#080808;box-shadow:var(--glow-cyan)}
+.act-2{background:transparent;color:var(--cyan);border:1px solid var(--dim-cyan)}
+.act-1:active{background:var(--green)}
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+<script>
+const S={cards:[],sel:null,open:false,tab:'compare',proc:false,prog:0,stage:''};
+function R(){const a=document.getElementById('app');a.innerHTML=hdr()+upl()+(S.proc?prog():'')+(S.cards.length?stats()+grid():empty());if(S.open&&S.sel!==null)a.innerHTML+=detail(S.cards[S.sel]);bind()}
+function hdr(){return'<div class="hdr"><h1>CARD<em>CROP</em></h1><div class="hdr-ver">v2.0 // AI</div></div>'}
+function upl(){return'<div class="upload" id="dz"><div class="upload-prompt"><b>&gt; scan</b> tap to capture or drop images</div><div class="upload-cmd">&gt; awaiting_input --mode=batch</div><input type="file" id="fi" accept="image/*" multiple capture="environment"></div>'}
+function prog(){return`<div class="prog"><div class="prog-track"><div class="prog-fill" style="width:${S.prog}%"></div></div><div class="prog-info"><span>${S.stage}</span><span>${S.prog}%</span></div></div>`}
+function stats(){const t=S.cards.length,o=S.cards.filter(c=>c.m?.player_name).length,e=S.cards.filter(c=>c.eUrl).length;return`<div class="stats"><div class="stat"><div class="stat-n">${t}</div><div class="stat-l">SCANNED</div></div><div class="stat"><div class="stat-n">${o}</div><div class="stat-l">OCR</div></div><div class="stat"><div class="stat-n">${e}</div><div class="stat-l">ENHANCED</div></div></div>`}
+function grid(){return'<div class="grid">'+S.cards.map((c,i)=>{const n=c.m?.player_name||c.fn;const tg=c.eUrl?'<span class="tag tag-enh">ENH</span>':c.m?.player_name?'<span class="tag tag-ocr">OCR</span>':'<span class="tag tag-new">NEW</span>';return`<div class="thumb" data-i="${i}"><img src="${c.url}" loading="lazy">${tg}<div class="name">${n}</div></div>`}).join('')+'</div>'}
+function empty(){return'<div class="empty"><div class="empty-glyph">\u25A6</div><p>&gt; no cards loaded<br>&gt; upload scans to initialize pipeline</p></div>'}
+function detail(c){if(!c)return'';const tabs=[{id:'compare',l:'Compare'},{id:'meta',l:'Data'},{id:'bio',l:'Bio'}];let con='';if(S.tab==='compare')con=cmpSlider(c);else if(S.tab==='meta')con=metaT(c);else con=bioT(c);return`<div class="overlay on" id="ov"></div><div class="panel on" id="pn"><div class="panel-handle"></div><div class="tabs">${tabs.map(t=>`<button class="tab ${S.tab===t.id?'on':''}" data-t="${t.id}">${t.l}</button>`).join('')}</div>${con}<div class="acts"><button class="act act-1" onclick="enhance(${S.sel})">${c.eUrl?'RE-ENHANCE':'ENHANCE'}</button><button class="act act-2" onclick="dl(${S.sel})">SAVE</button></div></div>`}
+function cmpSlider(c){const o=c.url,e=c.eUrl||c.url;return`<div class="cmp" id="cc"><img src="${e}"><div class="cmp-clip" id="cl" style="width:50%"><img src="${o}" id="ci"></div><div class="cmp-line" id="ln" style="left:50%"><div class="cmp-dot">\u25C6</div></div><div class="cmp-lbl" style="left:6px">BEFORE</div><div class="cmp-lbl" style="right:6px">AFTER</div></div>`}
+function metaT(c){const m=c.m||{};const rows=[['Player',m.player_name],['Year',m.year],['Mfr',m.manufacturer],['Set',m.set_name],['League',m.promotion],['Type',m.card_type],['Serial',m.serial],['Card #',m.card_number],['Height',m.height],['From',m.from_location],['Finisher',m.finishing_move],['Conf',m.ocr_confidence?m.ocr_confidence+'%':null]].filter(r=>r[1]);if(!rows.length)return'<div class="meta"><p style="color:var(--text-dim);font-size:11px">&gt; no metadata // card front or low-text image</p></div>';return'<div class="meta"><h3>// CARD DATA</h3>'+rows.map(([k,v])=>`<div class="meta-row"><span class="meta-k">${k}</span><span class="meta-v">${v}</span></div>`).join('')+'</div>'}
+function bioT(c){const b=c.m?.bio_text;if(!b)return'<div class="bio"><p style="color:var(--text-dim)">&gt; no bio text detected</p></div>';return`<div class="bio"><h3 style="font-family:var(--mono);font-size:12px;color:var(--green);margin-bottom:8px">// ${c.m?.player_name||'BIO'}</h3><p>${b}</p></div>`}
+function bind(){const dz=document.getElementById('dz'),fi=document.getElementById('fi');if(dz&&fi){dz.onclick=()=>fi.click();fi.onchange=e=>handleF(e.target.files);dz.ondragover=e=>{e.preventDefault();dz.classList.add('over')};dz.ondragleave=()=>dz.classList.remove('over');dz.ondrop=e=>{e.preventDefault();dz.classList.remove('over');handleF(e.dataTransfer.files)}}document.querySelectorAll('.thumb').forEach(el=>{el.onclick=()=>{S.sel=+el.dataset.i;S.open=true;S.tab='compare';R();setTimeout(initCmp,60)}});const ov=document.getElementById('ov');if(ov)ov.onclick=()=>{S.open=false;S.sel=null;R()};document.querySelectorAll('.tab').forEach(el=>{el.onclick=()=>{S.tab=el.dataset.t;R();setTimeout(initCmp,60)}});setTimeout(initCmp,60)}
+function initCmp(){const cc=document.getElementById('cc');if(!cc)return;const cl=document.getElementById('cl'),ln=document.getElementById('ln'),ci=document.getElementById('ci');if(!cl||!ln)return;let d=false;const up=x=>{const r=cc.getBoundingClientRect();const p=Math.max(2,Math.min(98,((x-r.left)/r.width)*100));cl.style.width=p+'%';ln.style.left=p+'%';if(ci)ci.style.width=r.width+'px'};cc.onpointerdown=e=>{d=true;up(e.clientX);cc.setPointerCapture(e.pointerId)};cc.onpointermove=e=>{if(d)up(e.clientX)};cc.onpointerup=()=>{d=false};if(ci)ci.style.width=cc.offsetWidth+'px'}
+async function handleF(files){if(!files||!files.length)return;S.proc=true;S.prog=0;S.stage='> initializing...';R();const fd=new FormData();for(let i=0;i<files.length;i++){if(files[i].type.startsWith('image/'))fd.append('files',files[i])}S.stage='> uploading + running OCR...';S.prog=20;R();try{const res=await fetch('/api/cards/upload',{method:'POST',body:fd});if(res.ok){const data=await res.json();for(const c of(data.cards||[])){S.cards.push({fn:c.fileName,url:c.url,eUrl:c.enhancedUrl,m:c.metadata,id:c.id,status:c.status})}S.prog=100;S.stage='> complete // '+data.cards.length+' cards processed'}else{S.stage='> upload failed: '+res.status}}catch(e){for(let i=0;i<files.length;i++){const f=files[i];if(!f.type.startsWith('image/'))continue;const url=await toUrl(f);S.cards.push({fn:f.name,url,eUrl:null,m:{},id:null,status:'local'})}S.prog=100;S.stage='> loaded locally (server unavailable)'}S.proc=false;R()}
+function toUrl(f){return new Promise(r=>{const rd=new FileReader();rd.onload=()=>r(rd.result);rd.readAsDataURL(f)})}
+async function enhance(i){const c=S.cards[i];if(!c||!c.id)return;try{const res=await fetch(`/api/cards/${c.id}/enhance`,{method:'POST'});if(!res.ok)return;for(let j=0;j<40;j++){await new Promise(r=>setTimeout(r,1500));const r2=await fetch(`/api/cards/${c.id}`);if(!r2.ok)continue;const d=await r2.json();if(d.card?.status==='enhanced'&&d.card.enhancedUrl){S.cards[i].eUrl=d.card.enhancedUrl;S.cards[i].status='enhanced';S.cards[i].m=d.card.metadata||S.cards[i].m;R();return}if(d.card?.status==='enhance_failed')return}}catch(e){console.log('enhance err:',e.message)}}
+function dl(i){const c=S.cards[i];if(!c)return;const a=document.createElement('a');a.href=c.eUrl||c.url;a.download=(c.m?.player_name||c.fn).replace(/[^a-zA-Z0-9]/g,'_')+'.png';a.click()}
+R();
+</script>
+</body>
+</html>
