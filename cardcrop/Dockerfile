@@ -4,8 +4,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
 RUN ln -sf /usr/bin/python3 /usr/bin/python
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev
+COPY package.json ./
+RUN npm install --omit=dev
 RUN pip3 install --no-cache-dir --break-system-packages opencv-python-headless numpy Pillow pytesseract
 COPY . .
 RUN mkdir -p /data/uploads /data/enhanced
