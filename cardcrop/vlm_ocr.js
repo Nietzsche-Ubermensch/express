@@ -10,26 +10,38 @@
  */
 const fs = require('fs');
 
-const PROMPT = `Read this trading card image and return ONLY a JSON object, no other text, no markdown fences.
+const PROMPT = `You are a professional wrestling trading card cataloger. This image is a WRESTLING trading card (WWE, AEW, NXT, WCW, TNA/Impact, ROH, NJPW, or another pro wrestling promotion).
+
+Read every piece of text on the card. Wrestling cards often use metallic foil, holographic refractor patterns, or heavily stylized fonts — look carefully through any visual noise for the actual printed text. Serial numbering is often stamped in silver, gold, or white ink and may appear on any edge or corner.
+
+Return ONLY a JSON object. No other text, no markdown fences.
 
 {
-  "player_name": "the wrestler or athlete's name exactly as printed",
-  "year": "4-digit year",
-  "manufacturer": "Topps, Upper Deck, Panini, Leaf, etc",
-  "set_name": "the product/set name",
-  "promotion": "AEW, WWE, NXT, NBA, NFL, etc",
-  "card_number": "card number if shown",
-  "serial": "serial numbering like 136/199",
-  "card_type": "base, patch, auto, relic, refractor, etc",
-  "height": "listed height",
-  "from_location": "listed hometown",
-  "finishing_move": "listed finishing move",
-  "bio_text": "the narrative paragraph if present",
-  "is_back": true or false,
-  "all_text": "every word you can read, in reading order"
+  "player_name": "wrestler's ring name exactly as printed (e.g. 'The Rock', 'Stone Cold Steve Austin', 'Kenny Omega')",
+  "real_name": "shoot name if printed separately from ring name, else null",
+  "year": "4-digit year from the card or copyright line",
+  "manufacturer": "Topps, Upper Deck, Panini, Fleer, Pacific, Comic Images, Duocards, etc",
+  "set_name": "product/set name (e.g. 'Heritage', 'Transcendent', 'Prizm', 'Chrome', 'Undisputed')",
+  "subset": "insert set or subset name if this is not a base card (e.g. 'Autographs', 'Hall of Fame', 'Legendary Cuts')",
+  "promotion": "WWE, AEW, NXT, WCW, ECW, TNA, Impact, ROH, NJPW, or whichever promotion appears",
+  "card_number": "card number exactly as printed (e.g. '42', 'HF-12', 'NXT-7')",
+  "serial": "serial numbering if stamped (e.g. '136/199', '023/050'). Read carefully — often stamped faintly",
+  "card_type": "base, autograph, auto, patch, relic, memorabilia, refractor, prizm, printing plate, kiss, 1/1, etc",
+  "parallel": "parallel variant name if any (e.g. 'Gold', 'Red', 'Superfractor', 'Shimmer', 'Black', 'Camo')",
+  "tag_team": "tag team name if listed (e.g. 'The Hardy Boyz', 'The New Day')",
+  "stable": "faction/stable if listed (e.g. 'nWo', 'D-Generation X', 'The Shield')",
+  "weight_class": "billed weight if shown",
+  "height": "billed height if shown",
+  "from_location": "billed hometown if shown (e.g. 'Parts Unknown', 'Venice Beach, CA')",
+  "finishing_move": "signature/finishing move if listed",
+  "championship": "championship title shown or mentioned on card",
+  "era": "era if identifiable from card design or text (e.g. 'Attitude Era', 'Ruthless Aggression')",
+  "bio_text": "the narrative/biographical paragraph if present on a card back",
+  "is_back": true if this is the back side of the card, false if front,
+  "all_text": "every word you can read on the card, in reading order, including fine print and copyright"
 }
 
-Use null for anything not visible. Do not invent or guess any value.`;
+Use null for anything not visible. Do not invent or guess any value — if text is unreadable through foil or glare, use null rather than guessing.`;
 
 const PROVIDERS = {
   openai: () => process.env.OPENAI_API_KEY,
@@ -78,7 +90,7 @@ async function readWithOpenAI(b64, mime, model) {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: JSON.stringify({
       model: model || process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini',
-      max_tokens: 900,
+      max_tokens: 1200,
       messages: [{ role: 'user', content: [
         { type: 'text', text: PROMPT },
         { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } },
@@ -100,7 +112,7 @@ async function readWithAnthropic(b64, mime, model) {
     },
     body: JSON.stringify({
       model: model || process.env.ANTHROPIC_VISION_MODEL || 'claude-sonnet-4-5',
-      max_tokens: 900,
+      max_tokens: 1200,
       messages: [{ role: 'user', content: [
         { type: 'image', source: { type: 'base64', media_type: mime, data: b64 } },
         { type: 'text', text: PROMPT },
@@ -121,7 +133,7 @@ async function readWithGoogle(b64, mime, model) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [ { text: PROMPT }, { inline_data: { mime_type: mime, data: b64 } } ] }],
-      generationConfig: { temperature: 0, maxOutputTokens: 900 },
+      generationConfig: { temperature: 0, maxOutputTokens: 1200 },
     }),
   });
   if (!res.ok) throw new Error(`Google ${res.status}: ${(await res.text()).slice(0, 300)}`);
@@ -135,7 +147,7 @@ async function readWithHF(b64, mime, model) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.HF_TOKEN}` },
     body: JSON.stringify({
-      model: m, max_tokens: 900,
+      model: m, max_tokens: 1200,
       messages: [{ role: 'user', content: [
         { type: 'text', text: PROMPT },
         { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } },
@@ -181,7 +193,11 @@ async function vlmRead(filePath, opts = {}) {
 }
 
 // ── quality score that drives the 80% review gate ──
-const WEIGHTS = { player_name: 30, year: 15, manufacturer: 15, set_name: 10, promotion: 10, card_type: 10, card_number: 5, serial: 5 };
+const WEIGHTS = {
+  player_name: 25, year: 12, manufacturer: 12, set_name: 10,
+  promotion: 10, card_type: 8, card_number: 5, serial: 5,
+  parallel: 5, subset: 5, finishing_move: 3,
+};
 const REVIEW_GATE = Number(process.env.VLM_REVIEW_GATE) || 80;
 function scoreQuality(m) {
   return Object.entries(WEIGHTS).reduce((s, [k, w]) => s + (m && m[k] ? w : 0), 0);
