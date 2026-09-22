@@ -1,22 +1,18 @@
-/**
- * VLM OCR — reads trading cards with a vision model instead of tesseract.
- *
- * Tesseract gets ~1 in 6 cards right on stylised wrestling card fonts and
- * invents plausible-looking garbage names ("Tung Hlingauet", "Bi Can Vas")
- * that can slip into a listing. A vision-language model reads them properly.
- *
- * Uses whichever key is present, in VLM_PROVIDER_ORDER (default below).
- * No key = {error:"no_vlm_configured"}; the tesseract path still works.
+/** Wrestling-card identification. Provider output always requires human review.
+ * The field-completeness score is not a calibrated accuracy/confidence score.
  */
 const fs = require('fs');
 
-const PROMPT = `You are a professional wrestling trading card cataloger. This image is a WRESTLING trading card (WWE, AEW, NXT, WCW, TNA/Impact, ROH, NJPW, or another pro wrestling promotion).
+const PROMPT = `You are a professional wrestling trading card cataloger. This app accepts only professional WRESTLING trading cards (WWE, AEW, NXT, WCW, TNA/Impact, ROH, NJPW, or another pro wrestling promotion).
+
+First inspect the image. For a clearly non-wrestling card return {"error":"unsupported_category"}. For an uncertain category return {"error":"category_unverified"}. Never relabel another sport as wrestling.
 
 Read every piece of text on the card. Wrestling cards often use metallic foil, holographic refractor patterns, or heavily stylized fonts — look carefully through any visual noise for the actual printed text. Serial numbering is often stamped in silver, gold, or white ink and may appear on any edge or corner.
 
 Return ONLY a JSON object. No other text, no markdown fences.
 
 {
+  "category": "wrestling",
   "player_name": "wrestler's ring name exactly as printed (e.g. 'The Rock', 'Stone Cold Steve Austin', 'Kenny Omega')",
   "real_name": "shoot name if printed separately from ring name, else null",
   "year": "4-digit year from the card or copyright line",
@@ -186,6 +182,7 @@ async function vlmRead(filePath, opts = {}) {
   } catch (e) {
     return { error: String(e.message).slice(0, 400), vlm_provider: provider, vlm_ms: Date.now() - t0 };
   }
+  meta = validateWrestling(meta);
   meta.vlm_provider = provider;
   if (opts.model) meta.vlm_model = opts.model;
   meta.vlm_ms = Date.now() - t0;
@@ -211,7 +208,7 @@ async function vlmReadGated(filePath, opts = {}) {
 
   const escalateTo = process.env.VLM_ESCALATE_MODEL;
   if (first.quality >= REVIEW_GATE || opts.escalate === false || !escalateTo) {
-    first.review_needed = first.quality < REVIEW_GATE;
+    first.review_needed = true;
     return first;
   }
 
@@ -219,13 +216,13 @@ async function vlmReadGated(filePath, opts = {}) {
     ? escalateTo.split(':')
     : [first.vlm_provider, escalateTo];
   const second = await vlmRead(filePath, { ...opts, provider: prov, model });
-  if (second.error) { first.review_needed = first.quality < REVIEW_GATE; return first; }
+  if (second.error) { first.review_needed = true; return first; }
   second.quality = scoreQuality(second);
 
   const best = second.quality > first.quality ? second : first;
   best.vlm_escalated = true;
   best.vlm_first_pass = { provider: first.vlm_provider, quality: first.quality };
-  best.review_needed = best.quality < REVIEW_GATE;
+  best.review_needed = true;
   return best;
 }
 
@@ -247,4 +244,15 @@ async function vlmReadMany(cards, opts = {}, onDone = () => {}) {
   await Promise.all(workers);
 }
 
-module.exports = { vlmRead, vlmReadGated, vlmReadMany, whichProvider, status, scoreQuality, REVIEW_GATE };
+function validateWrestling(meta) {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta) || meta.parse_error) {
+    return { error: 'invalid_identification_response', review_needed: true };
+  }
+  if (meta.error) return { ...meta, review_needed: true };
+  if (meta.category !== 'wrestling' || /^(NBA|NFL|MLB|NHL|UFC|baseball|basketball|football|hockey|MMA)$/i.test(meta.promotion || '')) {
+    return { error: 'unsupported_or_unverified_category', review_needed: true };
+  }
+  return { ...meta, review_needed: true };
+}
+
+module.exports = { validateWrestling, vlmRead, vlmReadGated, vlmReadMany, whichProvider, status, scoreQuality, REVIEW_GATE };

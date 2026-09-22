@@ -1,54 +1,22 @@
-# YOLO weights
+# Wrestling-card detector
 
-`card_detector.pt` goes here. The file is 22MB, too large to commit through
-the GitHub API, so add it directly:
+No trained weights are included in this repository. The application reports
+`weights_missing` until a usable `card_detector.pt` is supplied at `YOLO_MODEL`.
+A file existing on disk is not proof of a working detector: the health probe
+loads it and runs an inference before reporting `yolo.available: true`.
 
-```bash
-git lfs install
-git lfs track "cardcrop/models/*.pt"
-cp /path/to/card_detector_best.pt cardcrop/models/card_detector.pt
-git add .gitattributes cardcrop/models/card_detector.pt
-git commit -m "add trained YOLO card detector"
-git push
-```
+Previous documentation claimed training on 148 WWE/AEW scans and supplied mAP,
+precision and recall figures. Those claims are unverified here: neither the
+checkpoint, dataset split, training log nor evaluation output accompanies them.
+Do not treat those figures as deployed capability.
 
-Without LFS, a plain `git add` of a 22MB binary also works — GitHub's hard
-limit is 100MB per file. LFS just keeps the repo lean.
+Supply a trusted, validated wrestling-card checkpoint through the deployment
+source or a persistent mounted path. Record its SHA-256, dataset provenance and
+held-out evaluation before publishing accuracy claims. A detector trained only
+on tightly cropped scans must be tested on photos before claiming photo support.
 
-## What it is
-
-YOLOv11n-seg fine-tuned on 148 WWE/AEW card scans.
-
-| Metric | Value |
-|---|---|
-| Box mAP50 | 0.956 |
-| Box mAP50-95 | 0.841 |
-| Mask mAP50 | 0.957 |
-| Precision | 0.953 |
-| Recall | 0.931 |
-
-Trained 25 epochs, imgsz 320, batch 4, on CPU. Best epoch was 10.
-
-## Verifying it loaded
-
-`/api/health` reports `yolo.available`. Per-card, the enhance response
-includes `yolo_available`, `yolo_conf` and `yolo_cropped`.
-
-With no weights present the app runs normally — `enhance_worker.py` treats
-the whole frame as the card, which is correct for tight 600dpi scans and
-wrong only for photos with visible background.
-
-## Retraining
-
-The dataset generator lives in the batch pipeline. It writes YOLO-format
-segmentation labels from CV detections, splits train/val, and emits a
-`data.yaml`:
-
-```bash
-yolo segment train data=<dataset>/data.yaml model=yolo11n-seg.pt \
-  epochs=50 imgsz=640 batch=8 lr0=0.001
-```
-
-Add phone photos and binder-page scans before retraining — the current
-weights only ever saw tight flatbed scans, so they learned
-"card = full frame" and will not generalise to visible backgrounds.
+Without an accepted detection, enhancement preserves the whole frame, reports
+`detection_mode: whole_frame`, and requires a manual crop check. It does not
+claim segmentation, perspective rectification, learned upscaling, or that an
+uploaded image is a wrestling card. Category verification belongs to the
+identification/review step, not the geometric detector.

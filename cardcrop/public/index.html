@@ -8,7 +8,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CardCrop">
 <link rel="manifest" href="/manifest.webmanifest">
-<title>CardCrop</title>
+<title>CardCrop Wrestling</title>
 <style>
 :root{
   --app:#0b0d12;--panel:#12151c;--input:#0d1016;--line:#1e2330;--text:#e7e9ef;--muted:#8a93a8;
@@ -104,7 +104,7 @@ pre.all{white-space:pre-wrap;background:var(--input);padding:var(--s3);border-ra
 <body>
 
 <header>
-  <span class="logo">CARDCROP</span>
+  <span class="logo">CARDCROP WRESTLING</span>
   <nav class="tabs" id="tabs"></nav>
   <span class="spacer"></span>
   <span class="health mono"><span class="dot" id="hdot"></span><span id="htext">connecting…</span></span>
@@ -126,9 +126,9 @@ pre.all{white-space:pre-wrap;background:var(--input);padding:var(--s3);border-ra
     <section class="view" data-v="upload">
       <div class="panel">
         <div class="drop" id="drop">
-          <div style="font-size:15px;font-weight:600">Drop scans here or tap to capture</div>
-          <div class="muted" style="margin-top:var(--s1)">JPG · PNG · WEBP</div>
-          <input type="file" id="file" accept="image/*" multiple capture="environment" hidden>
+          <div style="font-size:15px;font-weight:600">Upload wrestling card scans</div>
+          <div class="muted" style="margin-top:var(--s1)">WWE · AEW · other wrestling promotions — JPG · PNG · WEBP</div>
+          <input type="file" id="file" accept="image/*" multiple hidden>
         </div>
         <div class="toolbar" style="margin-top:var(--s3)">
           <span class="mono muted" id="pendingCount">0 files ready</span><span class="spacer"></span>
@@ -158,7 +158,8 @@ pre.all{white-space:pre-wrap;background:var(--input);padding:var(--s3);border-ra
           <select id="auditPick" class="btn secondary" style="max-width:52%"></select>
           <span id="auditPill"></span><span class="spacer"></span>
           <button class="btn sm secondary" onclick="rerun(cur)">Re-read</button>
-          <button class="btn sm primary" onclick="accept(cur)">Accept</button>
+          <button class="btn sm secondary" onclick="enhanceOne(cur)">Enhance scan</button>
+          <button class="btn sm primary" onclick="accept(cur)">Accept this review</button>
         </div>
         <div style="display:grid;grid-template-columns:minmax(0,220px) 1fr;gap:var(--s4)" id="auditBody"></div>
       </div>
@@ -170,6 +171,7 @@ pre.all{white-space:pre-wrap;background:var(--input);padding:var(--s3);border-ra
           <h3 style="margin:0">Results</h3><span class="mono muted" id="rsum"></span><span class="spacer"></span>
           <button class="btn sm secondary" onclick="selectAll()">Select all</button>
           <button class="btn sm ghost" onclick="sel.clear();render()">Clear</button>
+          <button class="btn sm secondary" onclick="enhanceSelected()">Enhance selected</button>
           <button class="btn sm amber" id="runSel" onclick="runSelected()">Run on selected</button>
         </div>
         <div class="grid" id="results"></div>
@@ -190,17 +192,17 @@ const API = {
 const GATE=80;
 const TABS=[['upload','Upload'],['queue','Queue'],['tune','Tune'],['audit','Audit'],['results','Results']];
 let cards=[],pending=[],sel=new Set(),cur=null,view=localStorage.view||'upload';
-const settings=Object.assign({scale:2,descratch:0.35,denoise:0.20,sharpen:0.50,contrast:0.08,
+const settings=Object.assign({scale:2,descratch:0,denoise:0,sharpen:0.25,contrast:0,
   conservative:true,escalate:true,autoRotate:true},JSON.parse(localStorage.settings||'{}'));
 const save=()=>localStorage.settings=JSON.stringify(settings);
 
-const W={player_name:30,year:15,manufacturer:15,set_name:10,promotion:10,card_type:10,card_number:5,serial:5};
+const W={player_name:25,year:12,manufacturer:12,set_name:10,promotion:10,card_type:8,card_number:5,serial:5,parallel:5,subset:5,finishing_move:3};
 function quality(m={}){if(typeof m.quality==='number')return m.quality;
   return Object.entries(W).reduce((s,[k,w])=>s+(m[k]?w:0),0);}
 function uiStatus(c){const s=c.status||'queued';
   if(/fail|error/.test(s)||c.metadata?.error)return'failed';
   if(/process|running|pending|enhancing/.test(s))return'processing';
-  if(/complete|done|vlm|enhanced/.test(s))return quality(c.metadata)>=GATE||c.accepted?'complete':'review';
+  if(/complete|done|vlm|enhanced/.test(s))return c.accepted?'complete':'review';
   return'queued';}
 const pill=s=>`<span class="pill" data-s="${s}">${s==='review'?'review needed':s}</span>`;
 const meter=q=>`<div class="meter ${q<50?'bad':q<GATE?'low':''}" title="${q}% · gate ${GATE}%"><i style="width:${q}%"></i></div>`;
@@ -208,15 +210,15 @@ const esc=s=>String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&
 
 const SLIDERS=[
  ['scale','Scale',1,4,0.5,'×','Resamples with high-quality smoothing. Long edge capped at 2200px.'],
- ['descratch','Descratch',0,1,0.05,'','Median-filters thin bright/dark scanner scratches out before denoise.'],
- ['denoise','Denoise',0,1,0.05,'','Blends a 3×3 box average back over the original.'],
+ ['descratch','Descratch',0,1,0.05,'','Inpainting strength for candidate lines; may alter card detail. Disabled in conservative mode.'],
+ ['denoise','Denoise',0,1,0.05,'','Blends Gaussian smoothing. Disabled in conservative mode.'],
  ['sharpen','Sharpen',0,1,0.05,'','Dual-scale unsharp mask. Above 0.7 text starts to halo.'],
- ['contrast','Contrast',0,0.5,0.01,'','S-curve around mid grey. Foil and chrome clip fast — keep it low.'],
+ ['contrast','Contrast',0,0.5,0.01,'','Local contrast blend. Disabled in conservative mode.'],
 ];
 const TOGGLES=[
- ['conservative','Conservative processing','Caps contrast and protects foil. Use for listing photos where surface condition must show as-is.'],
- ['escalate','Escalate low-confidence reads','Reads under 80% get re-run on the strongest configured model before being flagged.'],
- ['autoRotate','Auto-rotate to reading orientation','Rotates only when text reads better rotated. Landscape backs stay landscape.'],
+ ['conservative','Conservative processing','Disables inpainting, denoise and colour changes; caps sharpening at 0.3. Originals remain available.'],
+ ['escalate','Retry incomplete identification','Low field completeness can trigger a configured second model. Every identification still needs review.'],
+ ['autoRotate','Auto-rotate to reading orientation','Checks all four orientations; preserves the original when OCR evidence is weak.'],
 ];
 function renderControls(mount){
   const sl=mount.querySelector('#sliders,.sliders'), tg=mount.querySelector('#toggles,.toggles');
@@ -230,22 +232,30 @@ function renderControls(mount){
     settings[sw.dataset.k]=!settings[sw.dataset.k];sw.classList.toggle('on');save();};
 }
 async function j(url,init){const r=await fetch(url,init);if(!r.ok)throw new Error(`${r.status} ${(await r.text()).slice(0,200)}`);return r.json();}
-async function loadCards(){try{const d=await j(API.cards);cards=d.cards||d;}catch(e){console.warn(e);}render();}
+async function loadCards(){try{const d=await j(API.cards);const accepted=new Set(cards.filter(c=>c.accepted).map(c=>c.id));cards=d.cards||d;cards.forEach(c=>c.accepted=accepted.has(c.id));}catch(e){console.warn(e);}render();}
 async function health(){try{const h=await j(API.health);const v=h.vlm;
   const prov=typeof v==='string'?v:(v&&v.provider)||'none';
   const ok=prov&&prov!=='not configured'&&prov!=='none'&&prov!=='null';
-  hdot.className='dot '+(ok?'ok':'');htext.textContent=ok?`vlm: ${prov}`:'vlm: not configured';runAll.disabled=!ok;
+  hdot.className='dot '+(ok?'ok':'');htext.textContent=ok?`vlm: ${prov}`:'VLM unavailable · enhancement '+(h.enhancement?.available?'ready':'unavailable');runAll.disabled=!ok;
+  const detectorNote=h.yolo?.available?'detector ready':'no detector · whole-frame processing';
+  htext.textContent+=' · '+detectorNote;
  }catch{hdot.className='dot';htext.textContent='offline';runAll.disabled=true;}}
 const qs=extra=>new URLSearchParams({...Object.fromEntries(Object.entries(settings).map(([k,v])=>[k,String(v)])),...extra}).toString();
-function setLocal(id,s){const c=cards.find(c=>c.id===id);if(c)c.status=s;}
-async function rerun(id){if(!id)return;setLocal(id,'processing');render();
+function setLocal(id,s){const c=cards.find(c=>c.id===id);if(c){c.status=s;c.accepted=false;}}
+async function rerun(id){if(!id)return;const c=cards.find(c=>c.id===id);if(c)c.accepted=false;setLocal(id,'processing');render();
   try{await j(API.vlmOne(id)+'?'+qs(),{method:'POST'});}catch(e){alert(e.message);}loadCards();}
 async function runSelected(){if(!sel.size)return;sel.forEach(id=>setLocal(id,'processing'));render();
   await Promise.allSettled([...sel].map(id=>j(API.vlmOne(id)+'?'+qs(),{method:'POST'})));loadCards();}
 runAll.onclick=async()=>{cards.forEach(c=>setLocal(c.id,'processing'));render();
   try{await j(API.vlmAll+'?'+qs(),{method:'POST'});}catch(e){alert(e.message);}loadCards();};
-async function removeCard(id){try{await j(API.remove(id),{method:'DELETE'});}catch{}loadCards();}
-function accept(id){const c=cards.find(c=>c.id===id);if(c){c.accepted=true;render();}}
+async function enhanceOne(id){if(!id)return;
+  try{await j(API.enhance(id)+'?'+qs(),{method:'POST'});setLocal(id,'enhancing');render();}
+  catch(e){alert(e.message);}await loadCards();}
+async function enhanceSelected(){
+  for(const id of sel)await enhanceOne(id);
+}
+async function removeCard(id){try{await j(API.remove(id),{method:'DELETE'});}catch(e){alert(e.message);}loadCards();}
+function accept(id){const c=cards.find(c=>c.id===id);if(c&&!c.metadata?.error&&!['processing','enhancing','failed'].includes(c.status)){c.accepted=true;render();}}
 function selectAll(){cards.forEach(c=>sel.add(c.id));render();}
 function go(v){view=v;localStorage.view=v;render();}
 
@@ -284,7 +294,8 @@ function render(){
         <div class="bar" data-s="${s}"><i style="width:${s==='processing'?60:s==='queued'?0:100}%"></i></div>
         <div style="margin-top:var(--s2)">${meter(q)}</div></div>
       <div style="display:flex;flex-direction:column;gap:var(--s1)">
-        <button class="btn sm secondary" onclick="rerun('${c.id}')">Retry</button>
+        <button class="btn sm secondary" onclick="enhanceOne('${c.id}')">Enhance</button>
+        <button class="btn sm secondary" onclick="rerun('${c.id}')">Re-read</button>
         <button class="btn sm ghost" onclick="cur='${c.id}';go('audit')">Audit</button>
         <button class="btn sm danger" onclick="removeCard('${c.id}')">Remove</button></div></div>`;}).join('')||'<p class="muted">No cards yet. Upload scans to start.</p>';
   auditPick.innerHTML=cards.map(c=>`<option value="${c.id}" ${c.id===cur?'selected':''}>${esc(c.fileName)} — ${esc(c.metadata?.player_name||'?')}</option>`).join('');
@@ -294,11 +305,14 @@ function render(){
   if(a){const m=a.metadata||{},q=quality(m);auditPill.innerHTML=pill(uiStatus(a));
     const keys=['player_name','year','manufacturer','set_name','promotion','card_number','serial','card_type','height','from_location','finishing_move','is_back'];
     auditBody.innerHTML=`<div><img src="${API.image(a)}" alt="" style="width:100%;border-radius:var(--r4)">
-      <div style="margin:var(--s3) 0 var(--s1);display:flex;justify-content:space-between"><span class="muted">Metadata quality</span><span class="mono">${q}%</span></div>${meter(q)}
+      <div style="margin:var(--s3) 0 var(--s1);display:flex;justify-content:space-between"><span class="muted">Field completeness · not accuracy</span><span class="mono">${q}%</span></div>${meter(q)}
       <div class="mono muted" style="margin-top:var(--s3)">${esc(m.vlm_provider||'tesseract')}${m.vlm_ms?' · '+m.vlm_ms+'ms':''}</div></div>
-      <div><dl class="kv">${keys.map(k=>`<dt>${k}</dt><dd class="${m[k]==null?'null':''}">${m[k]==null?'null':esc(m[k])}</dd>`).join('')}</dl>
+      <div><dl class="kv">${keys.map(k=>`<dt>${k==='player_name'?'wrestler_name':k}</dt><dd class="${m[k]==null?'null':''}">${m[k]==null?'null':esc(m[k])}</dd>`).join('')}</dl>
       ${m.bio_text?`<p class="muted" style="font-size:13px">${esc(m.bio_text)}</p>`:''}
       ${m.all_text?`<pre class="all mono">${esc(m.all_text)}</pre>`:''}
+      ${m.enhanceError?`<p style="color:var(--fail)">${esc(m.enhanceError)}</p>`:''}
+      ${m.enhancement?`<p class="muted">${esc(m.enhancement.output_size)} · ${m.enhancement.yolo_cropped?'Detector crop':'Whole frame — check crop manually'} · rotation ${esc(m.enhancement.rotation)}</p>`:''}
+      ${a.enhancedUrl?`<a class="btn secondary" href="${esc(a.enhancedUrl)}" target="_blank" rel="noopener">Open enhanced image</a><img src="${esc(a.enhancedUrl)}" alt="Enhanced wrestling card preview" style="width:100%;margin-top:16px">`:''}
       ${m.error?`<pre class="all mono" style="color:var(--fail)">${esc(m.error)}${m.hint?'\n\n'+esc(m.hint):''}</pre>`:''}</div>`;}
   else auditBody.innerHTML='<p class="muted">Nothing to audit.</p>';
   rsum.textContent=`${cards.length} scans · ${sel.size} selected · ${cards.filter(c=>uiStatus(c)==='complete').length} complete`;

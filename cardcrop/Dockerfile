@@ -15,9 +15,9 @@ RUN npm install --omit=dev
 # CPU-only torch keeps the image ~2GB instead of ~6GB with CUDA.
 # Railway has no GPU, so the CUDA wheels would be dead weight.
 RUN pip3 install --no-cache-dir --break-system-packages \
-      --extra-index-url https://download.pytorch.org/whl/cpu \
-      opencv-python-headless numpy Pillow pytesseract \
-      torch torchvision ultralytics
+      --index-url https://download.pytorch.org/whl/cpu torch torchvision
+RUN pip3 install --no-cache-dir --break-system-packages \
+      opencv-python-headless numpy Pillow pytesseract ultralytics
 
 COPY . .
 
