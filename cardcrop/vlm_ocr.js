@@ -41,7 +41,7 @@ Return ONLY a JSON object. No other text, no markdown fences.
   "all_text": "every word you can read on the card, in reading order, including fine print and copyright"
 }
 
-If the text is sideways or upside down, still report text_top accurately and use null for any name you cannot actually read. Never identify a wrestler from their appearance — only from printed text.
+If the text is sideways or upside down, say so in text_top and use null for any name you cannot actually read. Never identify a wrestler from their appearance — only from printed text.
 
 Use null for anything not visible. Do not invent or guess any value — if text is unreadable through foil or glare, use null rather than guessing.`;
 
@@ -72,15 +72,20 @@ function status() {
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// OpenAI's "try again in 469ms" is useless when the org's whole TPM bucket is
+// full (seen live: Limit 200000, Used 200000). The hint may only lengthen the
+// exponential floor, never shorten it. Default budget ~60s spans a TPM window.
 function retryDelay(res, body, attempt) {
+  const floor = Math.min(2000 * 2 ** attempt, 30000);
+  let hint = 0;
   const ra = Number(res.headers.get('retry-after'));
-  if (Number.isFinite(ra) && ra > 0) return Math.min(ra * 1000, 60000);
+  if (Number.isFinite(ra) && ra > 0) hint = ra * 1000;
   const m = /try again in ([\d.]+)\s*(ms|s)/i.exec(body || '');
-  if (m) return Math.min(Number(m[1]) * (m[2].toLowerCase() === 'ms' ? 1 : 1000) + 250, 60000);
-  return Math.min(2000 * 2 ** attempt, 30000);
+  if (m) hint = Math.max(hint, Number(m[1]) * (m[2].toLowerCase() === 'ms' ? 1 : 1000));
+  return Math.min(Math.max(floor, hint + 250), 60000);
 }
 /** POST with retry on 429 / 5xx. Throws `${label} ${status}: body` on final failure. */
-async function postJSON(url, init, label, attempts = Number(process.env.VLM_RETRIES) || 4) {
+async function postJSON(url, init, label, attempts = Number(process.env.VLM_RETRIES) || 6) {
   for (let i = 0; ; i++) {
     const res = await fetch(url, init);
     if (res.ok) return res.json();
@@ -108,7 +113,7 @@ function parseJsonLoose(raw) {
   catch { return { parse_error: true, raw_output: String(raw).slice(0, 600) }; }
 }
 
-async function readWithOpenAI(b64, mime, model) {
+async function readWithOpenAI(b64, mime, model, prompt = PROMPT) {
   const d = await postJSON('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
@@ -116,7 +121,7 @@ async function readWithOpenAI(b64, mime, model) {
       model: model || process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini',
       max_tokens: 1200,
       messages: [{ role: 'user', content: [
-        { type: 'text', text: PROMPT },
+        { type: 'text', text: prompt },
         { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } },
       ]}],
     }),
@@ -124,7 +129,7 @@ async function readWithOpenAI(b64, mime, model) {
   return parseJsonLoose(d.choices?.[0]?.message?.content);
 }
 
-async function readWithAnthropic(b64, mime, model) {
+async function readWithAnthropic(b64, mime, model, prompt = PROMPT) {
   const d = await postJSON('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -137,7 +142,7 @@ async function readWithAnthropic(b64, mime, model) {
       max_tokens: 1200,
       messages: [{ role: 'user', content: [
         { type: 'image', source: { type: 'base64', media_type: mime, data: b64 } },
-        { type: 'text', text: PROMPT },
+        { type: 'text', text: prompt },
       ]}],
     }),
   }, 'Anthropic');
@@ -145,21 +150,21 @@ async function readWithAnthropic(b64, mime, model) {
   return parseJsonLoose(txt);
 }
 
-async function readWithGoogle(b64, mime, model) {
+async function readWithGoogle(b64, mime, model, prompt = PROMPT) {
   const key = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
   const m = model || process.env.GEMINI_VISION_MODEL || 'gemini-3.6-flash';
   const d = await postJSON(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${key}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      contents: [{ parts: [ { text: PROMPT }, { inline_data: { mime_type: mime, data: b64 } } ] }],
+      contents: [{ parts: [ { text: prompt }, { inline_data: { mime_type: mime, data: b64 } } ] }],
       generationConfig: { temperature: 0, maxOutputTokens: 1200 },
     }),
   }, 'Google');
   return parseJsonLoose(d.candidates?.[0]?.content?.parts?.[0]?.text);
 }
 
-async function readWithHF(b64, mime, model) {
+async function readWithHF(b64, mime, model, prompt = PROMPT) {
   const m = model || process.env.HF_VISION_MODEL || 'zai-org/GLM-OCR';
   const d = await postJSON('https://router.huggingface.co/v1/chat/completions', {
     method: 'POST',
@@ -167,7 +172,7 @@ async function readWithHF(b64, mime, model) {
     body: JSON.stringify({
       model: m, max_tokens: 1200,
       messages: [{ role: 'user', content: [
-        { type: 'text', text: PROMPT },
+        { type: 'text', text: prompt },
         { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } },
       ]}],
     }),
@@ -183,14 +188,35 @@ const READERS = {
 };
 
 // ── orientation ──
-// Degrees CLOCKWISE to apply so text reads upright, keyed by where the tops
-// of the letters currently point. Sideways scans were the main cause of
-// invented names: the model could not read the nameplate and guessed.
-const TURN = { up: 0, left: 90, down: 180, right: 270 };
-const MAX_TURNS = Number(process.env.VLM_MAX_TURNS ?? 2);
+// Asking the model which way text points ("left"/"right") proved unreliable
+// on real scans: card 0996 was reported "down" then "right" and ended up sent
+// upside-down. Models judge *comparatively* far better, so when a read looks
+// wrong we show all four rotations as numbered panels and ask which is upright.
+const PANEL_ROTATION = [0, 90, 180, 270]; // degrees clockwise, panels 1..4
+const PICK_PROMPT = `This image shows ONE trading card four times, in panels numbered 1, 2, 3, 4 (the number is above each panel). Each panel is rotated differently. Which single panel shows the card's printed text upright — readable left-to-right, not sideways, not upside down? Return ONLY JSON: {"upright_panel": 1, 2, 3 or 4}`;
+
+function tmpPath(ext) {
+  return path.join(os.tmpdir(), `vlm_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`);
+}
+
+function makePanels(src) {
+  const out = tmpPath('jpg');
+  execFileSync('python3', ['-c', `import cv2,sys,numpy as np
+im=cv2.imread(sys.argv[1]); assert im is not None
+rots=[im,cv2.rotate(im,cv2.ROTATE_90_CLOCKWISE),cv2.rotate(im,cv2.ROTATE_180),cv2.rotate(im,cv2.ROTATE_90_COUNTERCLOCKWISE)]
+S=512; tiles=[]
+for i,r in enumerate(rots):
+    h,w=r.shape[:2]; k=S/max(h,w); r=cv2.resize(r,(max(1,round(w*k)),max(1,round(h*k))),interpolation=cv2.INTER_AREA)
+    t=np.full((S+70,S+20,3),255,np.uint8); y=70+(S-r.shape[0])//2; x=10+(S-r.shape[1])//2
+    t[y:y+r.shape[0],x:x+r.shape[1]]=r
+    cv2.putText(t,str(i+1),((S+20)//2-18,55),cv2.FONT_HERSHEY_SIMPLEX,1.8,(0,0,210),5)
+    tiles.append(t)
+cv2.imwrite(sys.argv[2],np.vstack([np.hstack(tiles[:2]),np.hstack(tiles[2:])]),[cv2.IMWRITE_JPEG_QUALITY,90])`, src, out], { timeout: 30000 });
+  return out;
+}
 
 function rotateImage(src, degreesCW) {
-  const out = path.join(os.tmpdir(), `vlm_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`);
+  const out = tmpPath('jpg');
   const code = { 90: 'ROTATE_90_CLOCKWISE', 180: 'ROTATE_180', 270: 'ROTATE_90_COUNTERCLOCKWISE' }[degreesCW];
   execFileSync('python3', ['-c',
     'import cv2,sys\nim=cv2.imread(sys.argv[1])\nassert im is not None\n' +
@@ -201,7 +227,8 @@ function rotateImage(src, degreesCW) {
 
 // ── grounding ──
 // A name is only kept if the model's own transcription contains it.
-const norm = t => String(t || '').toUpperCase().normalize('NFKD').replace(/[^A-Z0-9]+/g, ' ').trim();
+const norm = t => String(t || '').replace(/[\u2122\u00ae\u00a9\u2120]/g, ' ').normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
 function groundName(meta) {
   if (!meta) return meta;
   if (!meta.player_name) { meta.name_grounded = null; meta.player_name_unverified = null; meta.warnings = []; return meta; }
@@ -215,10 +242,19 @@ function groundName(meta) {
   return meta;
 }
 
-async function readOnce(provider, filePath, model) {
+async function readOnce(provider, filePath, model, prompt) {
   const b64 = fs.readFileSync(filePath).toString('base64');
   const mime = filePath.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
-  return READERS[provider](b64, mime, model);
+  return READERS[provider](b64, mime, model, prompt);
+}
+
+/** Does this read suggest the image was not upright? */
+function looksMisoriented(meta) {
+  if (!meta || meta.parse_error || meta.error) return false;
+  const top = String(meta.text_top || 'up').toLowerCase();
+  if (top !== 'up') return true;
+  if (!meta.player_name) return true;
+  return groundName({ player_name: meta.player_name, all_text: meta.all_text }).name_grounded !== true;
 }
 
 /** Read one card image with whichever VLM is configured. */
@@ -233,20 +269,21 @@ async function vlmRead(filePath, opts = {}) {
     };
   }
   const t0 = Date.now();
-  let meta, applied = 0, turns = 0, tmp = null;
+  let meta, applied = 0, method = 'original', tmp = null, pickedPanel = null;
   try {
     meta = await readOnce(provider, filePath, opts.model);
-    // Re-read upright. Measured against the original so errors don't compound;
-    // a wrong left/right guess shows up as "down" and gets one more correction.
-    while (opts.orient !== false && turns < MAX_TURNS && meta && !meta.parse_error) {
-      const step = TURN[String(meta.text_top || 'up').toLowerCase()];
-      if (!step) break;
-      applied = (applied + step) % 360;
-      turns++;
-      if (tmp) { try { fs.unlinkSync(tmp); } catch {} tmp = null; }
-      if (applied === 0) { meta = await readOnce(provider, filePath, opts.model); continue; }
-      tmp = rotateImage(filePath, applied);
-      meta = await readOnce(provider, tmp, opts.model);
+    if (opts.orient !== false && looksMisoriented(meta)) {
+      tmp = makePanels(filePath);
+      const pick = await readOnce(provider, tmp, opts.model, PICK_PROMPT);
+      fs.unlinkSync(tmp); tmp = null;
+      pickedPanel = Number(pick && pick.upright_panel);
+      const deg = PANEL_ROTATION[pickedPanel - 1];
+      method = 'panel_pick';
+      if (deg) {
+        tmp = rotateImage(filePath, deg);
+        const reread = await readOnce(provider, tmp, opts.model);
+        if (reread && !reread.parse_error) { meta = reread; applied = deg; }
+      }
     }
   } catch (e) {
     return { error: String(e.message).slice(0, 400), vlm_provider: provider, vlm_ms: Date.now() - t0 };
@@ -256,7 +293,8 @@ async function vlmRead(filePath, opts = {}) {
   meta = validateWrestling(meta);
   if (!meta.error) groundName(meta);
   meta.read_rotation = applied;
-  meta.orientation_passes = turns;
+  meta.orientation_method = method;
+  meta.orientation_panel = pickedPanel;
   meta.vlm_provider = provider;
   if (opts.model) meta.vlm_model = opts.model;
   meta.vlm_ms = Date.now() - t0;
@@ -329,4 +367,4 @@ function validateWrestling(meta) {
   return { ...meta, review_needed: true };
 }
 
-module.exports = { groundName, retryDelay, TURN, validateWrestling, vlmRead, vlmReadGated, vlmReadMany, whichProvider, status, scoreQuality, REVIEW_GATE };
+module.exports = { groundName, retryDelay, looksMisoriented, PANEL_ROTATION, validateWrestling, vlmRead, vlmReadGated, vlmReadMany, whichProvider, status, scoreQuality, REVIEW_GATE };
