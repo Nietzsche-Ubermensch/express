@@ -152,6 +152,7 @@ app.post('/api/cards/:id/vlm', async (req, res) => {
   try {
     const meta = await vlm.vlmReadGated(card.filePath, optsFrom(req.query));
     card.metadata = { ...card.metadata, ...meta };
+    if (!meta.error) delete card.metadata.error;
     card.status = meta.error ? 'failed' : 'vlm_complete';
     persist();
     res.json({ card: sanitize(card) });
@@ -175,6 +176,7 @@ app.post('/api/cards/vlm-all', (req, res) => {
 
   vlm.vlmReadMany(all, optsFrom(req.query), (card, meta) => {
     card.metadata = { ...card.metadata, ...meta };
+    if (!meta.error) delete card.metadata.error;
     card.status = meta.error ? 'failed' : 'vlm_complete';
     persist();
   }).catch(() => {});

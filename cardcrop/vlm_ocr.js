@@ -123,7 +123,7 @@ async function readWithAnthropic(b64, mime, model) {
 
 async function readWithGoogle(b64, mime, model) {
   const key = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
-  const m = model || process.env.GEMINI_VISION_MODEL || 'gemini-2.0-flash';
+  const m = model || process.env.GEMINI_VISION_MODEL || 'gemini-3.6-flash';
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${key}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
