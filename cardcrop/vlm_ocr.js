@@ -2,6 +2,9 @@
  * The field-completeness score is not a calibrated accuracy/confidence score.
  */
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
 
 const PROMPT = `You are a professional wrestling trading card cataloger. This app accepts only professional WRESTLING trading cards (WWE, AEW, NXT, WCW, TNA/Impact, ROH, NJPW, or another pro wrestling promotion).
 
@@ -33,9 +36,12 @@ Return ONLY a JSON object. No other text, no markdown fences.
   "championship": "championship title shown or mentioned on card",
   "era": "era if identifiable from card design or text (e.g. 'Attitude Era', 'Ruthless Aggression')",
   "bio_text": "the narrative/biographical paragraph if present on a card back",
+  "text_top": "which direction the TOP of the main printed letters points in this image: up, left, right, or down",
   "is_back": true if this is the back side of the card, false if front,
   "all_text": "every word you can read on the card, in reading order, including fine print and copyright"
 }
+
+If the text is sideways or upside down, still report text_top accurately and use null for any name you cannot actually read. Never identify a wrestler from their appearance — only from printed text.
 
 Use null for anything not visible. Do not invent or guess any value — if text is unreadable through foil or glare, use null rather than guessing.`;
 
@@ -65,6 +71,28 @@ function status() {
   };
 }
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function retryDelay(res, body, attempt) {
+  const ra = Number(res.headers.get('retry-after'));
+  if (Number.isFinite(ra) && ra > 0) return Math.min(ra * 1000, 60000);
+  const m = /try again in ([\d.]+)\s*(ms|s)/i.exec(body || '');
+  if (m) return Math.min(Number(m[1]) * (m[2].toLowerCase() === 'ms' ? 1 : 1000) + 250, 60000);
+  return Math.min(2000 * 2 ** attempt, 30000);
+}
+/** POST with retry on 429 / 5xx. Throws `${label} ${status}: body` on final failure. */
+async function postJSON(url, init, label, attempts = Number(process.env.VLM_RETRIES) || 4) {
+  for (let i = 0; ; i++) {
+    const res = await fetch(url, init);
+    if (res.ok) return res.json();
+    const body = await res.text();
+    if ((res.status === 429 || res.status >= 500) && i < attempts - 1) {
+      await sleep(retryDelay(res, body, i));
+      continue;
+    }
+    throw new Error(`${label} ${res.status}: ${body.slice(0, 300)}`);
+  }
+}
+
 function parseJsonLoose(raw) {
   let c = (raw || '').trim();
   if (c.includes('```')) {
@@ -81,7 +109,7 @@ function parseJsonLoose(raw) {
 }
 
 async function readWithOpenAI(b64, mime, model) {
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+  const d = await postJSON('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: JSON.stringify({
@@ -92,14 +120,12 @@ async function readWithOpenAI(b64, mime, model) {
         { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } },
       ]}],
     }),
-  });
-  if (!res.ok) throw new Error(`OpenAI ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const d = await res.json();
+  }, 'OpenAI');
   return parseJsonLoose(d.choices?.[0]?.message?.content);
 }
 
 async function readWithAnthropic(b64, mime, model) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+  const d = await postJSON('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -114,9 +140,7 @@ async function readWithAnthropic(b64, mime, model) {
         { type: 'text', text: PROMPT },
       ]}],
     }),
-  });
-  if (!res.ok) throw new Error(`Anthropic ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const d = await res.json();
+  }, 'Anthropic');
   const txt = (d.content || []).filter(x => x.type === 'text').map(x => x.text).join('\n');
   return parseJsonLoose(txt);
 }
@@ -124,22 +148,20 @@ async function readWithAnthropic(b64, mime, model) {
 async function readWithGoogle(b64, mime, model) {
   const key = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
   const m = model || process.env.GEMINI_VISION_MODEL || 'gemini-3.6-flash';
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${key}`, {
+  const d = await postJSON(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${key}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [ { text: PROMPT }, { inline_data: { mime_type: mime, data: b64 } } ] }],
       generationConfig: { temperature: 0, maxOutputTokens: 1200 },
     }),
-  });
-  if (!res.ok) throw new Error(`Google ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const d = await res.json();
+  }, 'Google');
   return parseJsonLoose(d.candidates?.[0]?.content?.parts?.[0]?.text);
 }
 
 async function readWithHF(b64, mime, model) {
   const m = model || process.env.HF_VISION_MODEL || 'zai-org/GLM-OCR';
-  const res = await fetch('https://router.huggingface.co/v1/chat/completions', {
+  const d = await postJSON('https://router.huggingface.co/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.HF_TOKEN}` },
     body: JSON.stringify({
@@ -149,9 +171,7 @@ async function readWithHF(b64, mime, model) {
         { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } },
       ]}],
     }),
-  });
-  if (!res.ok) throw new Error(`HF ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const d = await res.json();
+  }, 'HF');
   return parseJsonLoose(d.choices?.[0]?.message?.content);
 }
 
@@ -161,6 +181,45 @@ const READERS = {
   google: readWithGoogle,
   huggingface: readWithHF,
 };
+
+// ── orientation ──
+// Degrees CLOCKWISE to apply so text reads upright, keyed by where the tops
+// of the letters currently point. Sideways scans were the main cause of
+// invented names: the model could not read the nameplate and guessed.
+const TURN = { up: 0, left: 90, down: 180, right: 270 };
+const MAX_TURNS = Number(process.env.VLM_MAX_TURNS ?? 2);
+
+function rotateImage(src, degreesCW) {
+  const out = path.join(os.tmpdir(), `vlm_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`);
+  const code = { 90: 'ROTATE_90_CLOCKWISE', 180: 'ROTATE_180', 270: 'ROTATE_90_COUNTERCLOCKWISE' }[degreesCW];
+  execFileSync('python3', ['-c',
+    'import cv2,sys\nim=cv2.imread(sys.argv[1])\nassert im is not None\n' +
+    `cv2.imwrite(sys.argv[2], cv2.rotate(im, cv2.${code}), [cv2.IMWRITE_JPEG_QUALITY, 95])`,
+    src, out], { timeout: 30000 });
+  return out;
+}
+
+// ── grounding ──
+// A name is only kept if the model's own transcription contains it.
+const norm = t => String(t || '').toUpperCase().normalize('NFKD').replace(/[^A-Z0-9]+/g, ' ').trim();
+function groundName(meta) {
+  if (!meta) return meta;
+  if (!meta.player_name) { meta.name_grounded = null; meta.player_name_unverified = null; meta.warnings = []; return meta; }
+  const text = ` ${norm(meta.all_text)} `;
+  const tokens = norm(meta.player_name).split(' ').filter(t => t.length >= 3);
+  const grounded = tokens.length > 0 && tokens.every(t => text.includes(` ${t} `));
+  meta.name_grounded = grounded;
+  meta.player_name_unverified = grounded ? null : meta.player_name;
+  meta.warnings = grounded ? [] : ['name_not_in_read_text'];
+  if (!grounded) meta.player_name = null;
+  return meta;
+}
+
+async function readOnce(provider, filePath, model) {
+  const b64 = fs.readFileSync(filePath).toString('base64');
+  const mime = filePath.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+  return READERS[provider](b64, mime, model);
+}
 
 /** Read one card image with whichever VLM is configured. */
 async function vlmRead(filePath, opts = {}) {
@@ -173,16 +232,31 @@ async function vlmRead(filePath, opts = {}) {
       hint: 'Set OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY or HF_TOKEN in Railway > Variables, then redeploy.',
     };
   }
-  const b64 = fs.readFileSync(filePath).toString('base64');
-  const mime = filePath.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
   const t0 = Date.now();
-  let meta;
+  let meta, applied = 0, turns = 0, tmp = null;
   try {
-    meta = await READERS[provider](b64, mime, opts.model);
+    meta = await readOnce(provider, filePath, opts.model);
+    // Re-read upright. Measured against the original so errors don't compound;
+    // a wrong left/right guess shows up as "down" and gets one more correction.
+    while (opts.orient !== false && turns < MAX_TURNS && meta && !meta.parse_error) {
+      const step = TURN[String(meta.text_top || 'up').toLowerCase()];
+      if (!step) break;
+      applied = (applied + step) % 360;
+      turns++;
+      if (tmp) { try { fs.unlinkSync(tmp); } catch {} tmp = null; }
+      if (applied === 0) { meta = await readOnce(provider, filePath, opts.model); continue; }
+      tmp = rotateImage(filePath, applied);
+      meta = await readOnce(provider, tmp, opts.model);
+    }
   } catch (e) {
     return { error: String(e.message).slice(0, 400), vlm_provider: provider, vlm_ms: Date.now() - t0 };
+  } finally {
+    if (tmp) { try { fs.unlinkSync(tmp); } catch {} }
   }
   meta = validateWrestling(meta);
+  if (!meta.error) groundName(meta);
+  meta.read_rotation = applied;
+  meta.orientation_passes = turns;
   meta.vlm_provider = provider;
   if (opts.model) meta.vlm_model = opts.model;
   meta.vlm_ms = Date.now() - t0;
@@ -255,4 +329,4 @@ function validateWrestling(meta) {
   return { ...meta, review_needed: true };
 }
 
-module.exports = { validateWrestling, vlmRead, vlmReadGated, vlmReadMany, whichProvider, status, scoreQuality, REVIEW_GATE };
+module.exports = { groundName, retryDelay, TURN, validateWrestling, vlmRead, vlmReadGated, vlmReadMany, whichProvider, status, scoreQuality, REVIEW_GATE };
