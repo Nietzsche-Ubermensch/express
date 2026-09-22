@@ -12,10 +12,13 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 
-# CPU-only torch keeps the image ~2GB instead of ~6GB with CUDA.
-# Railway has no GPU, so the CUDA wheels would be dead weight.
+# Upgrade Debian pip so wheel metadata names are normalized correctly.
+RUN pip3 install --no-cache-dir --break-system-packages --upgrade pip
+
+# Explicit CPU versions prevent CUDA wheels; PyPI supplies general dependencies.
 RUN pip3 install --no-cache-dir --break-system-packages \
-      --index-url https://download.pytorch.org/whl/cpu torch torchvision
+      --extra-index-url https://download.pytorch.org/whl/cpu \
+      torch==2.5.1+cpu torchvision==0.20.1+cpu
 RUN pip3 install --no-cache-dir --break-system-packages \
       opencv-python-headless numpy Pillow pytesseract ultralytics
 
