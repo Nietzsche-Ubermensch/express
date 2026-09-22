@@ -9,11 +9,11 @@ except ImportError:
 
 SETS = {'ALLURE','PYRO','PRIZM','SELECT','OPTIC','DONRUSS','CHROME','HERITAGE','MOSAIC','FINEST','LUMINANCE','OBSIDIAN','FLUX','CONTENDERS','IMMACULATE','NATIONAL TREASURES'}
 MFRS = {'UPPER DECK':'Upper Deck','TOPPS':'Topps','PANINI':'Panini','LEAF':'Leaf'}
-PROMOS = {'AEW':'AEW','ALL ELITE':'AEW','WWE':'WWE','NXT':'NXT','NBA':'NBA','NFL':'NFL','MLB':'MLB','NHL':'NHL','UFC':'UFC'}
+PROMOS = {'AEW':'AEW','ALL ELITE':'AEW','WWE':'WWE','NXT':'NXT','WWF':'WWF','WCW':'WCW','ECW':'ECW','TNA':'TNA','IMPACT':'Impact','ROH':'ROH','NJPW':'NJPW'}
 SKIP = SETS | {'AEW','WWE','NXT','CONGRATULATIONS','SUPERSTAR','COMMEMORATIVE','UPPER DECK','TOPPS','PANINI','LOGO PATCH','PATCH CARD','RESERVED'}
 
 def extract(path):
-    meta = {}
+    meta = {'category': 'wrestling', 'review_needed': True, 'identification_status': 'unverified_ocr'}
     try: img = Image.open(path)
     except: return {"error": "cannot open image"}
     try: text = pytesseract.image_to_string(img, config='--psm 1')
@@ -34,7 +34,7 @@ def extract(path):
         for s in SETS:
             if s in lu and 'set_name' not in meta: meta['set_name'] = s.title()
         for k,v in PROMOS.items():
-            if k in lu and 'promotion' not in meta: meta['promotion'] = v
+            if re.search(r'(?<![A-Z0-9])' + re.escape(k) + r'(?![A-Z0-9])', lu) and 'promotion' not in meta: meta['promotion'] = v
         m = re.search(r'(\d{1,4})\s*/\s*(\d{1,4})', line)
         if m and 'serial' not in meta: meta['serial'] = f"{m.group(1)}/{m.group(2)}"
         m = re.search(r'HEIGHT:\s*(.+)', line, re.I)
@@ -67,7 +67,7 @@ def extract(path):
                 if lc.isupper() or '\u00a9' in lc or len(lc) < 5: break
                 bio.append(lc)
         if bio: meta['bio_text'] = ' '.join(bio)
-    meta['ocr_confidence'] = min(100, sum(1 for k in ['player_name','year','manufacturer','set_name','promotion','serial','height','from_location'] if k in meta) * 12)
+    meta['metadata_completeness'] = min(100, sum(1 for k in ['player_name','year','manufacturer','set_name','promotion','serial','height','from_location'] if k in meta) * 12)
     return meta
 
 if __name__ == '__main__':

@@ -5,6 +5,12 @@ const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
 const vlm = require('./vlm_ocr');
+const { enhanceOptsFrom, readEnhancement } = require('./enhance-contract');
+let workerReady = false;
+let enhancementQueue = Promise.resolve();
+const ocrQueues = [Promise.resolve(), Promise.resolve()];
+let nextOCR = 0;
+let detector = { available: false, reason: 'checking' };
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const STORAGE = process.env.STORAGE_DIR || path.join(__dirname, 'data');
@@ -58,7 +64,7 @@ function snapshot() {
 function persist() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try { fs.writeFileSync(REGISTRY, JSON.stringify(snapshot())); }
+    try { fs.writeFileSync(REGISTRY + '.tmp', JSON.stringify(snapshot())); fs.renameSync(REGISTRY + '.tmp', REGISTRY); }
     catch (e) { console.warn('registry write failed:', e.message); }
   }, 400);
 }
@@ -95,11 +101,14 @@ function restore() {
 app.get(['/health', '/api/health'], (_req, res) => {
   res.json({
     status: 'ok',
+    category: 'wrestling',
+    revision: process.env.RAILWAY_GIT_COMMIT_SHA || 'local',
+    enhancement: { available: workerReady, engine: 'opencv', maxLongEdge: 2200 },
     uptime: process.uptime(),
     jobs: jobs.size,
     comfyui: COMFYUI_URL ? 'configured' : 'not configured',
     vlm: vlm.status(),
-    yolo: { available: fs.existsSync(YOLO_MODEL), path: YOLO_MODEL },
+    yolo: { ...detector, path: YOLO_MODEL },
     review_gate: vlm.REVIEW_GATE,
     storage: STORAGE,
   });
@@ -134,20 +143,11 @@ app.post('/api/cards/upload', upload.array('files', 200), (req, res) => {
 const optsFrom = q => ({
   provider: q.provider, model: q.model, escalate: q.escalate !== 'false',
 });
-const enhanceOptsFrom = q => ({
-  scale: q.scale ? Number(q.scale) : 2,
-  descratch: q.descratch !== undefined ? Number(q.descratch) : 0.35,
-  denoise: q.denoise !== undefined ? Number(q.denoise) : 0.2,
-  sharpen: q.sharpen !== undefined ? Number(q.sharpen) : 0.5,
-  contrast: q.contrast !== undefined ? Number(q.contrast) : 0.08,
-  conservative: q.conservative !== 'false',
-  autoRotate: q.autoRotate !== 'false',
-});
-
 // ══ VLM: one card ══
 app.post('/api/cards/:id/vlm', async (req, res) => {
   const card = jobs.get(req.params.id);
   if (!card) return res.status(404).json({ error: 'Card not found' });
+  if (['processing', 'enhancing'].includes(card.status)) return res.status(409).json({ error: 'Already processing' });
   card.status = 'processing';
   try {
     const meta = await vlm.vlmReadGated(card.filePath, optsFrom(req.query));
@@ -165,7 +165,7 @@ app.post('/api/cards/:id/vlm', async (req, res) => {
 
 // ══ VLM: batch, returns immediately and the UI polls ══
 app.post('/api/cards/vlm-all', (req, res) => {
-  let all = [...jobs.values()];
+  let all = [...jobs.values()].filter(c => !['enhancing', 'processing'].includes(c.status));
   if (req.query.only === 'pending') {
     all = all.filter(c => c.status !== 'vlm_complete' || c.metadata?.review_needed);
   }
@@ -184,10 +184,12 @@ app.post('/api/cards/vlm-all', (req, res) => {
 app.post('/api/cards/:id/enhance', (req, res) => {
   const card = jobs.get(req.params.id);
   if (!card) return res.status(404).json({ error: 'Card not found' });
-  if (card.status === 'enhancing') return res.status(409).json({ error: 'Already processing' });
+  if (['enhancing', 'processing'].includes(card.status)) return res.status(409).json({ error: 'Already processing' });
+  let opts;
+  try { opts = enhanceOptsFrom(req.query); } catch (e) { return res.status(400).json({ error: e.message }); }
   card.status = 'enhancing';
   persist();
-  runEnhance(card, enhanceOptsFrom(req.query))
+  runEnhance(card, opts)
     .then(() => { card.status = 'enhanced'; })
     .catch(e => { card.status = 'failed'; card.metadata.enhanceError = e.message; })
     .finally(persist);
@@ -195,8 +197,9 @@ app.post('/api/cards/:id/enhance', (req, res) => {
 });
 
 app.post('/api/cards/enhance-all', (req, res) => {
-  const opts = enhanceOptsFrom(req.query);
-  const all = [...jobs.values()].filter(c => c.status !== 'enhancing');
+  let opts;
+  try { opts = enhanceOptsFrom(req.query); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const all = [...jobs.values()].filter(c => !['enhancing', 'processing'].includes(c.status));
   all.forEach(c => { c.status = 'enhancing'; });
   persist();
   res.json({ started: all.length });
@@ -226,9 +229,10 @@ app.get('/api/cards', (_req, res) => {
 app.delete('/api/cards/:id', (req, res) => {
   const card = jobs.get(req.params.id);
   if (!card) return res.status(404).json({ error: 'Card not found' });
+  if (['processing', 'enhancing'].includes(card.status)) return res.status(409).json({ error: 'Wait for processing to finish before deleting' });
   try { fs.unlinkSync(card.filePath); } catch {}
   if (card.enhancedUrl) {
-    try { fs.unlinkSync(path.join(ENHANCED_DIR, path.basename(card.enhancedUrl))); } catch {}
+    try { fs.unlinkSync(path.join(ENHANCED_DIR, path.basename(card.enhancedUrl.split('?')[0]))); } catch {}
   }
   jobs.delete(req.params.id);
   persist();
@@ -246,17 +250,28 @@ app.get('/api/cards/export/json', (_req, res) => {
 
 // ══ python subprocesses ══
 function runOCR(imagePath) {
+  const lane = nextOCR++ % ocrQueues.length;
+  const pending = ocrQueues[lane].then(() => executeOCR(imagePath));
+  ocrQueues[lane] = pending.catch(() => {});
+  return pending;
+}
+function executeOCR(imagePath) {
   return new Promise((resolve, reject) => {
     execFile('python3', [path.join(__dirname, 'ocr_worker.py'), imagePath],
       { timeout: 30000 }, (err, stdout, stderr) => {
         if (err) return reject(new Error(stderr || err.message));
-        try { resolve(JSON.parse(stdout)); }
+        try { const result = JSON.parse(stdout); if (result.error) return reject(new Error(result.error)); resolve(result); }
         catch { reject(new Error('OCR output parse error')); }
       });
   });
 }
 
 function runEnhance(card, opts = {}) {
+  const pending = enhancementQueue.then(() => executeEnhance(card, opts));
+  enhancementQueue = pending.catch(() => {});
+  return pending;
+}
+function executeEnhance(card, opts = {}) {
   return new Promise((resolve, reject) => {
     const outName = card.id + '_enhanced.png';
     const outPath = path.join(ENHANCED_DIR, outName);
@@ -264,15 +279,18 @@ function runEnhance(card, opts = {}) {
       [path.join(__dirname, 'enhance_worker.py'), card.filePath, outPath, JSON.stringify(opts)],
       { timeout: 180000 }, (err, stdout, stderr) => {
         if (err) return reject(new Error(stderr || err.message));
-        card.enhancedUrl = `/enhanced/${outName}`;
         try {
-          const r = JSON.parse(stdout);
+          const result = readEnhancement(stdout, outPath);
+          card.enhancedUrl = `/enhanced/${outName}?v=${Date.now()}`;
+          delete card.metadata.enhanceError;
+          card.metadata.enhancement = result;
           Object.assign(card.metadata, {
-            scratches_found: r.scratches_found, rotation: r.rotation,
-            output_size: r.output_size, orientation: r.orientation,
-            yolo_conf: r.yolo_conf, yolo_cropped: r.yolo_cropped,
+            rotation: result.rotation, output_size: result.output_size,
+            orientation: result.orientation, yolo_cropped: result.yolo_cropped,
+            yolo_available: result.yolo_available, yolo_conf: result.yolo_conf,
+            detection_warning: result.detection_warning,
           });
-        } catch {}
+        } catch (e) { return reject(e); }
         resolve();
       });
   });
@@ -292,10 +310,16 @@ app.get('/{*path}', (_req, res) => {
 });
 
 const boot = restore();
+execFile('python3', [path.join(__dirname, 'enhance_worker.py'), '--capabilities'],
+  { timeout: 60000 }, (err, stdout) => {
+    if (err) { detector = { available: false, reason: 'worker_probe_failed' }; return; }
+    try { detector = JSON.parse(stdout); workerReady = !detector.error; }
+    catch { detector = { available: false, reason: 'invalid_worker_probe' }; }
+  });
 
-app.listen(PORT, '0.0.0.0', () => {
+const listener = app.listen(PORT, '0.0.0.0', () => {
   const s = vlm.status();
-  console.log(`CardCrop AI on http://0.0.0.0:${PORT}`);
+  console.log(`CardCrop AI on http://0.0.0.0:${listener.address().port}`);
   console.log(`  storage: ${STORAGE}`);
   console.log(`  jobs:    ${jobs.size} (${boot.restored} from registry, ${boot.adopted} adopted from disk)`);
   console.log(`  yolo:    ${fs.existsSync(YOLO_MODEL) ? YOLO_MODEL : 'no weights — whole-frame fallback'}`);
@@ -306,7 +330,7 @@ app.listen(PORT, '0.0.0.0', () => {
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {
     clearTimeout(saveTimer);
-    try { fs.writeFileSync(REGISTRY, JSON.stringify(snapshot())); } catch {}
+    try { fs.writeFileSync(REGISTRY + '.tmp', JSON.stringify(snapshot())); fs.renameSync(REGISTRY + '.tmp', REGISTRY); } catch {}
     process.exit(0);
   });
 }

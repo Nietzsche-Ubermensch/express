@@ -1,230 +1,212 @@
 #!/usr/bin/env python3
-"""
-Enhance worker v3 — subprocess called by Express.
+"""Wrestling-card scan enhancement. Originals are never overwritten.
 
-Pipeline: YOLO detect → orientation → resample → adaptive descratch →
-          dual-scale unsharp → CLAHE + vibrance
-
-YOLO weights are optional. If models/card_detector.pt is present the
-detector runs and crops to the card; if not, the whole frame is treated
-as the card (correct for tight 600dpi scans) and everything else still
-works. Nothing fails just because the weights are missing.
+Whole-frame fallback is explicitly reported, not called detection. No learned
+restoration is implied by OpenCV resampling. Conservative mode preserves surface
+marks and colour; inpainting is an explicit non-conservative preview option.
 """
-import sys, os, json
+import contextlib
+import json
+import math
+import os
+import sys
+
 import cv2
 import numpy as np
 
-OUT_W, OUT_H = 1500, 2100
 MODEL_PATH = os.environ.get('YOLO_MODEL', os.path.join(os.path.dirname(__file__), 'models', 'card_detector.pt'))
-
 _model = None
 _model_tried = False
+_model_error = 'not_checked'
 
 
 def get_model():
-    """Lazy-load YOLO. Returns None if weights or ultralytics are absent."""
-    global _model, _model_tried
+    global _model, _model_tried, _model_error
     if _model_tried:
         return _model
     _model_tried = True
-    if not os.path.exists(MODEL_PATH):
+    if not os.path.isfile(MODEL_PATH):
+        _model_error = 'weights_missing'
         return None
     try:
-        from ultralytics import YOLO
-        _model = YOLO(MODEL_PATH)
-    except Exception:
+        # Ultralytics may print initialization messages; stdout is JSON-only.
+        with contextlib.redirect_stdout(sys.stderr):
+            from ultralytics import YOLO
+            _model = YOLO(MODEL_PATH)
+            _model.predict(np.zeros((320, 320, 3), dtype=np.uint8), device='cpu', verbose=False)
+        _model_error = None
+    except Exception as exc:
         _model = None
+        _model_error = 'model_load_or_inference_failed'
+        print(f'Detector unavailable: {exc}', file=sys.stderr)
     return _model
 
 
-def detect_card(img):
-    """
-    YOLO card detection. Returns (x1,y1,x2,y2,conf) or None.
+def detector_status():
+    return {'available': get_model() is not None, 'reason': _model_error, 'path': MODEL_PATH}
 
-    Crop is only accepted when the box covers >=70% of BOTH dimensions and
-    confidence >=0.55. A loose guard here previously let a 0.42-confidence
-    box covering 41% of the card through, which stretched a partial crop
-    into garbage.
-    """
-    m = get_model()
-    if m is None:
+
+def detect_card(img):
+    model = get_model()
+    if model is None:
         return None
     try:
-        r = m(img, conf=0.35, verbose=False)[0]
-        if len(r.boxes) == 0:
-            return None
-        i = int(r.boxes.conf.argmax())
-        x1, y1, x2, y2 = r.boxes[i].xyxy[0].tolist()
-        return (int(x1), int(y1), int(x2), int(y2), float(r.boxes[i].conf[0]))
-    except Exception:
+        with contextlib.redirect_stdout(sys.stderr):
+            boxes = model(img, conf=0.55, device='cpu', verbose=False)[0].boxes
+        h, w = img.shape[:2]
+        accepted = []
+        for box in boxes:
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            conf = float(box.conf[0])
+            if not all(math.isfinite(v) for v in (x1, y1, x2, y2, conf)):
+                continue
+            x1, y1 = max(0, int(x1)), max(0, int(y1))
+            x2, y2 = min(w, int(x2)), min(h, int(y2))
+            if conf >= 0.55 and x2-x1 >= w*0.70 and y2-y1 >= h*0.70:
+                accepted.append((x1, y1, x2, y2, conf))
+        return max(accepted, key=lambda b: b[4], default=None)
+    except Exception as exc:
+        print(f'Detection failed: {exc}', file=sys.stderr)
         return None
 
 
-def _readability(img_bgr):
-    """OCR a downscaled copy, return summed confidence of real words."""
+def _readability(img):
     try:
         import pytesseract
-        from PIL import Image
-        h, w = img_bgr.shape[:2]
-        k = 700.0 / max(h, w)
-        small = cv2.resize(img_bgr, (int(w * k), int(h * k)), interpolation=cv2.INTER_AREA)
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        d = pytesseract.image_to_data(Image.fromarray(gray), config='--psm 6',
-                                      output_type=pytesseract.Output.DICT)
-        score = 0
-        for i in range(len(d['text'])):
-            wd = d['text'][i].strip()
-            c = int(d['conf'][i])
-            if c > 55 and len(wd) >= 3 and any(ch.isalpha() for ch in wd):
-                score += c
-        return score
+        h, w = img.shape[:2]
+        k = min(1.0, 700.0 / max(h, w))
+        small = cv2.resize(img, (max(1, round(w*k)), max(1, round(h*k))), interpolation=cv2.INTER_AREA)
+        data = pytesseract.image_to_data(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY),
+                                        config='--psm 6', output_type=pytesseract.Output.DICT, timeout=10)
+        return sum(float(conf) for word, conf in zip(data['text'], data['conf'])
+                   if float(conf) > 55 and len(word.strip()) >= 3 and any(c.isalpha() for c in word))
     except Exception:
         return 0
 
 
-def best_orientation(img_bgr):
-    """
-    Keep the orientation that reads. Landscape-designed card backs (Topps
-    patch/relic backs) already read correctly unrotated, so forcing them
-    portrait is wrong. Only rotate when a rotation genuinely reads better.
-    """
-    s_orig = _readability(img_bgr)
-    cw = cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE)
-    ccw = cv2.rotate(img_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    s_cw = _readability(cw)
-    s_ccw = _readability(ccw)
-    best = max(s_orig, s_cw, s_ccw)
-
-    if best < 200:  # image-only front, nothing reads either way
-        h, w = img_bgr.shape[:2]
-        return (cw, 'cw') if w > h else (img_bgr, 'none')
-    if s_orig >= best * 0.85:
-        return img_bgr, 'none'
-    return (cw, 'cw') if s_cw >= s_ccw else (ccw, 'ccw')
+def best_orientation(img):
+    variants = [(img, 'none'), (cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE), 'cw'),
+                (cv2.rotate(img, cv2.ROTATE_180), '180'),
+                (cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE), 'ccw')]
+    scores = [_readability(v) for v, _ in variants]
+    best = max(scores)
+    # No readable evidence means preserve the scan, including landscape designs.
+    if best < 200 or scores[0] >= best * 0.85:
+        return variants[0]
+    return variants[scores.index(best)]
 
 
-def adaptive_descratch(img):
-    """
-    Scratch removal with a per-card adaptive threshold.
-
-    A fixed threshold read halftone dots and foil texture as scratches
-    (mean 448 per card). Scaling the threshold to each card's own texture
-    energy and keeping only long thin components brings that to ~17.
-    """
+def adaptive_descratch(img, strength):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    lap_full = np.abs(cv2.Laplacian(gray, cv2.CV_64F, ksize=3))
-    energy = float(np.percentile(lap_full, 92))
-    thresh = max(25.0, energy * 2.5)
-
-    mask = (lap_full > thresh).astype(np.uint8) * 255
-    k_h = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
-    k_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25))
-    lines = cv2.bitwise_or(cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_h),
-                           cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_v))
-
+    energy_map = np.abs(cv2.Laplacian(gray, cv2.CV_64F, ksize=3))
+    threshold = max(25.0, float(np.percentile(energy_map, 92)) * (4.0 - 1.5*strength))
+    mask = (energy_map > threshold).astype(np.uint8)*255
+    lines = cv2.bitwise_or(
+        cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))),
+        cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25))))
     n, labels, stats, _ = cv2.connectedComponentsWithStats(lines, 8)
     keep = np.zeros_like(lines)
-    real = 0
+    candidates = 0
     for i in range(1, n):
-        w = stats[i, cv2.CC_STAT_WIDTH]
-        h = stats[i, cv2.CC_STAT_HEIGHT]
-        area = stats[i, cv2.CC_STAT_AREA]
-        aspect = max(w, h) / max(1, min(w, h))
-        if area >= 30 and aspect >= 6:
+        w, h, area = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT], stats[i, cv2.CC_STAT_AREA]
+        if area >= 30 and max(w, h) / max(1, min(w, h)) >= 6:
             keep[labels == i] = 255
-            real += 1
-
-    if real == 0:
-        return img, 0, thresh
+            candidates += 1
+    if not candidates:
+        return img, 0
     keep = cv2.dilate(keep, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
-    return cv2.inpaint(img, keep, 4, cv2.INPAINT_NS), real, thresh
+    repaired = cv2.inpaint(img, keep, 4, cv2.INPAINT_NS)
+    return cv2.addWeighted(img, 1-strength, repaired, strength, 0), candidates
+
+
+def validate_options(opts):
+    if not isinstance(opts, dict):
+        raise ValueError('options must be an object')
+    out = {}
+    for key, default, lo, hi in [('scale', 2, 1, 4), ('descratch', 0, 0, 1),
+                               ('denoise', 0, 0, 1), ('sharpen', 0.25, 0, 1), ('contrast', 0, 0, 0.5)]:
+        value = opts.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not lo <= value <= hi:
+            raise ValueError(f'{key} must be between {lo} and {hi}')
+        out[key] = value
+    for key in ['autoRotate', 'conservative']:
+        value = opts.get(key, True)
+        if not isinstance(value, bool):
+            raise ValueError(f'{key} must be a boolean')
+        out[key] = value
+    return out
 
 
 def enhance(input_path, output_path, opts=None):
-    opts = opts or {}
+    opts = validate_options({} if opts is None else opts)
+    if os.path.realpath(input_path) == os.path.realpath(output_path):
+        raise ValueError('output must not overwrite the original')
     img = cv2.imread(input_path)
     if img is None:
-        return {"error": "cannot read image"}
-
+        raise ValueError('cannot read image')
     src_h, src_w = img.shape[:2]
-
-    # 1. YOLO detect + crop (skipped entirely when weights absent)
-    yolo_conf = 0.0
-    cropped = False
     det = detect_card(img)
     if det:
-        x1, y1, x2, y2, conf = det
-        yolo_conf = conf
-        bw, bh = x2 - x1, y2 - y1
-        if bw >= src_w * 0.70 and bh >= src_h * 0.70 and conf >= 0.55:
-            pad = 4
-            x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
-            x2, y2 = min(src_w, x2 + pad), min(src_h, y2 + pad)
-            img = img[y1:y2, x1:x2]
-            cropped = True
-
-    # 2. Orientation
+        x1, y1, x2, y2, _ = det
+        img = img[max(0, y1-4):min(src_h, y2+4), max(0, x1-4):min(src_w, x2+4)]
     rot = 'none'
-    if opts.get('autoRotate', True):
+    if opts['autoRotate']:
         img, rot = best_orientation(img)
-
-    # 3. Resample, respecting the card's own aspect
     h, w = img.shape[:2]
-    if w > h:
-        img = cv2.resize(img, (OUT_H, OUT_W), interpolation=cv2.INTER_LANCZOS4)
-    else:
-        img = cv2.resize(img, (OUT_W, OUT_H), interpolation=cv2.INTER_LANCZOS4)
-
-    # 4. Descratch
-    scratches, thresh = 0, 0.0
-    if float(opts.get('descratch', 0.35)) > 0.01:
-        img, scratches, thresh = adaptive_descratch(img)
-
-    # 5. Dual-scale unsharp
-    sharpen = float(opts.get('sharpen', 0.5))
-    if sharpen > 0.01:
+    factor = min(opts['scale'], 2200 / max(h, w))
+    size = (max(1, round(w*factor)), max(1, round(h*factor)))
+    img = cv2.resize(img, size, interpolation=cv2.INTER_AREA if factor < 1 else cv2.INTER_LANCZOS4)
+    candidates = 0
+    # Surface repair/colour changes require explicit non-conservative mode.
+    if not opts['conservative']:
+        if opts['descratch'] > 0:
+            img, candidates = adaptive_descratch(img, opts['descratch'])
+        if opts['denoise'] > 0:
+            img = cv2.addWeighted(img, 1-opts['denoise'], cv2.GaussianBlur(img, (3, 3), 0), opts['denoise'], 0)
+        if opts['contrast'] > 0:
+            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            equalized = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
+            l = cv2.addWeighted(l, 1-opts['contrast'], equalized, opts['contrast'], 0)
+            img = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+    sharpen = min(opts['sharpen'], 0.3) if opts['conservative'] else opts['sharpen']
+    if sharpen > 0:
         f = img.astype(np.float32)
-        img = np.clip(f + (f - cv2.GaussianBlur(f, (3, 3), 1.0)) * (sharpen * 1.7)
-                        + (f - cv2.GaussianBlur(f, (5, 5), 2.0)) * (sharpen * 0.8),
-                      0, 255).astype(np.uint8)
+        img = np.clip(f + (f-cv2.GaussianBlur(f, (3, 3), 1.0))*sharpen*1.7
+                      + (f-cv2.GaussianBlur(f, (5, 5), 2.0))*sharpen*0.8, 0, 255).astype(np.uint8)
+    # Commit a complete image atomically; a failure cannot advertise a stale file.
+    temporary = output_path + '.tmp.png'
+    try:
+        if not cv2.imwrite(temporary, img, [cv2.IMWRITE_PNG_COMPRESSION, 4]):
+            raise OSError('cannot write enhanced image')
+        os.replace(temporary, output_path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    status = detector_status()
+    return {'category': 'wrestling', 'rotation': rot, 'source': f'{src_w}x{src_h}',
+            'output_size': f'{size[0]}x{size[1]}', 'orientation': 'landscape' if size[0] > size[1] else 'portrait',
+            'yolo_available': status['available'], 'yolo_conf': round(det[4], 3) if det else None,
+            'yolo_cropped': bool(det), 'detection_mode': 'yolo_crop' if det else 'whole_frame',
+            'detection_warning': None if det else (status['reason'] or 'no_accepted_detection'),
+            'scratch_candidates': candidates, 'surface_altered': candidates > 0,
+            'conservative': opts['conservative'], 'review_needed': True}
 
-    # 6. CLAHE + vibrance
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
-    l = np.clip(l.astype(np.float32) * 1.08, 0, 255).astype(np.uint8)
-    img = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
 
-    if not opts.get('conservative', True):
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
-        s = hsv[:, :, 1]
-        hsv[:, :, 1] = np.clip(s * (1.0 + 0.18 * (1.0 - s / 255.0)), 0, 255)
-        img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-
-    cv2.imwrite(output_path, img, [cv2.IMWRITE_PNG_COMPRESSION, 4])
-    oh, ow = img.shape[:2]
-    return {
-        "scratches_found": scratches,
-        "scratches_fixed": scratches,
-        "scratch_threshold": round(thresh, 1),
-        "rotation": rot,
-        "yolo_conf": round(yolo_conf, 3),
-        "yolo_cropped": cropped,
-        "yolo_available": get_model() is not None,
-        "source": f"{src_w}x{src_h}",
-        "output_size": f"{ow}x{oh}",
-        "orientation": "landscape" if ow > oh else "portrait",
-    }
+def main():
+    try:
+        if sys.argv[1:] == ['--capabilities']:
+            result = detector_status()
+        elif len(sys.argv) in (3, 4):
+            result = enhance(sys.argv[1], sys.argv[2], json.loads(sys.argv[3]) if len(sys.argv) == 4 else {})
+        else:
+            raise ValueError('usage: enhance_worker.py <input> <output> [opts_json]')
+        print(json.dumps(result, allow_nan=False))
+        return 0
+    except Exception as exc:
+        print(json.dumps({'error': str(exc)}))
+        return 1
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 3:
-        print(json.dumps({"error": "usage: enhance_worker.py <input> <output> [opts_json]"}))
-        sys.exit(0)
-    opts = {}
-    if len(sys.argv) > 3:
-        try:
-            opts = json.loads(sys.argv[3])
-        except Exception:
-            pass
-    print(json.dumps(enhance(sys.argv[1], sys.argv[2], opts), default=str))
+    sys.exit(main())

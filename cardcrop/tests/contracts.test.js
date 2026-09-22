@@ -1,0 +1,33 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const os=require('node:os');
+const path=require('node:path');
+const {enhanceOptsFrom,readEnhancement}=require('../enhance-contract');
+const {validateWrestling}=require('../vlm_ocr');
+
+test('invalid sliders fail instead of silently becoming defaults',()=>{
+  for(const query of [{scale:'NaN'},{sharpen:'-1'},{contrast:'Infinity'},{denoise:['0','1']},{autoRotate:'maybe'}]) {
+    assert.throws(()=>enhanceOptsFrom(query));
+  }
+  assert.equal(enhanceOptsFrom({scale:'3',conservative:'false'}).scale,3);
+  assert.equal(enhanceOptsFrom({conservative:'false'}).conservative,false);
+});
+test('worker errors and malformed output cannot produce success',()=>{
+  for(const out of ['garbage','null','{}','{"error":"cannot read image"}']) assert.throws(()=>readEnhancement(out,'missing'));
+});
+test('worker result needs an actual PNG, not merely an existing file',()=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'enhance-contract-'));
+  const file=path.join(dir,'out.png');
+  const result=JSON.stringify({output_size:'100x200',yolo_cropped:false});
+  try {
+    assert.throws(()=>readEnhancement(result,file));
+    fs.writeFileSync(file,'not an image');assert.throws(()=>readEnhancement(result,file));
+  }finally{fs.rmSync(dir,{recursive:true});}
+});
+test('non-wrestling and uncertain identification are never accepted',()=>{
+  for(const meta of [null,[],{player_name:'Unknown'},{category:'baseball'},
+    {category:'wrestling',promotion:'NBA'},{parse_error:true}]) assert.ok(validateWrestling(meta).error);
+  const good=validateWrestling({category:'wrestling',promotion:'AEW',player_name:'Kenny Omega'});
+  assert.equal(good.player_name,'Kenny Omega');assert.equal(good.review_needed,true);
+});
