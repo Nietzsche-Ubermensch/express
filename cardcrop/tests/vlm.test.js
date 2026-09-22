@@ -2,6 +2,7 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');const os=require('node:os');const path=require('node:path');
 const {execFileSync}=require('node:child_process');
+const {Buffer}=require('node:buffer');
 const vlm=require('../vlm_ocr');
 
 test('names absent from the transcription are demoted, not kept',()=>{
@@ -42,7 +43,7 @@ function mockOpenAI(dir,replies,seen){
     const r=replies.shift();const msg=JSON.parse(init.body).messages[0].content;
     const f=path.join(dir,`seen${seen.length}.jpg`);fs.writeFileSync(f,Buffer.from(msg[1].image_url.url.split(',')[1],'base64'));
     seen.push({size:execFileSync('python3',['-c',`import cv2;im=cv2.imread(${JSON.stringify(f)});print(im.shape[1],im.shape[0])`]).toString().trim(),
-               pick:msg[0].text.includes('upright_panel')});
+      pick:msg[0].text.includes('upright_panel')});
     return {ok:r.status===200,status:r.status,headers:{get:()=>null},
       json:async()=>({choices:[{message:{content:JSON.stringify(r.body)}}]}),text:async()=>typeof r.body==='string'?r.body:''};
   };

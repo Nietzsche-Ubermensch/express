@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const { Buffer } = require('node:buffer');
 
 function enhanceOptsFrom(q) {
   const out = {};
