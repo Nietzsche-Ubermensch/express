@@ -90,3 +90,20 @@ test('panel 1 pick keeps the original read; orient=false never picks',withKey(as
     m=await vlm.vlmRead(card(dir,80,120),{provider:'openai',orient:false});assert.equal(seen.length,1);assert.equal(m.orientation_method,'original');
   }finally{fs.rmSync(dir,{recursive:true});}
 }));
+
+test('gemini request disables deliberation, asks for JSON, and joins non-thought parts',async()=>{
+  const k=process.env.GEMINI_API_KEY,f=global.fetch;process.env.GEMINI_API_KEY='test';
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'vlm-'));let body;
+  global.fetch=async(_u,init)=>{body=JSON.parse(init.body);return{ok:true,status:200,headers:{get:()=>null},json:async()=>({candidates:[{finishReason:'STOP',content:{parts:[
+    {thought:true,text:'hmm'},{text:'{"category":"wrestling","text_top":"up",'},{text:'"player_name":"Kenny Omega","all_text":"KENNY OMEGA"}'}]}}]})};};
+  try{
+    const m=await vlm.vlmRead(card(dir,120,80),{provider:'google'});
+    assert.equal(body.generationConfig.thinkingConfig.thinkingLevel,'minimal');
+    assert.equal(body.generationConfig.responseMimeType,'application/json');
+    assert.ok(body.generationConfig.maxOutputTokens>=8192);
+    assert.equal(m.player_name,'Kenny Omega');assert.equal(m.error,undefined);
+    global.fetch=async()=>({ok:true,status:200,headers:{get:()=>null},json:async()=>({candidates:[{finishReason:'MAX_TOKENS',content:{parts:[{text:'{"category":"wrest'}]}}]})});
+    const t=await vlm.vlmRead(card(dir,120,80),{provider:'google'});
+    assert.match(t.error,/truncated at maxOutputTokens/);
+  }finally{global.fetch=f;if(k===undefined)delete process.env.GEMINI_API_KEY;else process.env.GEMINI_API_KEY=k;fs.rmSync(dir,{recursive:true});}
+});
