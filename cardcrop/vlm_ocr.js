@@ -158,10 +158,23 @@ async function readWithGoogle(b64, mime, model, prompt = PROMPT) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [ { text: prompt }, { inline_data: { mime_type: mime, data: b64 } } ] }],
-      generationConfig: { temperature: 0, maxOutputTokens: 1200 },
+      // maxOutputTokens includes hidden thinking tokens on Gemini 3.x; with
+      // default (medium) thinking, a 1200 cap was spent reasoning and the JSON
+      // came back truncated. Card reading needs no deliberation.
+      generationConfig: {
+        temperature: 0,
+        maxOutputTokens: Number(process.env.GEMINI_MAX_OUTPUT_TOKENS) || 8192,
+        responseMimeType: 'application/json',
+        thinkingConfig: { thinkingLevel: process.env.GEMINI_THINKING_LEVEL || 'minimal' },
+      },
     }),
   }, 'Google');
-  return parseJsonLoose(d.candidates?.[0]?.content?.parts?.[0]?.text);
+  const cand = d.candidates?.[0];
+  const text = (cand?.content?.parts || []).filter(x => !x.thought).map(x => x.text || '').join('');
+  if (!text && cand?.finishReason) throw new Error(`Google finishReason=${cand.finishReason} with no text (thoughts=${d.usageMetadata?.thoughtsTokenCount ?? '?'})`);
+  const out = parseJsonLoose(text);
+  if (out.parse_error && cand?.finishReason === 'MAX_TOKENS') throw new Error('Google output truncated at maxOutputTokens (raise GEMINI_MAX_OUTPUT_TOKENS or lower GEMINI_THINKING_LEVEL)');
+  return out;
 }
 
 async function readWithHF(b64, mime, model, prompt = PROMPT) {
