@@ -169,6 +169,9 @@ app.post('/api/cards/vlm-all', (req, res) => {
   let all = [...jobs.values()].filter(c => !['enhancing', 'processing'].includes(c.status));
   if (req.query.only === 'pending') {
     all = all.filter(c => c.status !== 'vlm_complete' || c.metadata?.review_needed);
+  } else if (req.query.only === 'failed') {
+    // Retry just the failures (rate limits, category rejections) server-side.
+    all = all.filter(c => c.status === 'failed');
   }
   all.forEach(c => { c.status = 'processing'; });
   persist();

@@ -8,7 +8,7 @@ const { execFileSync } = require('child_process');
 
 const PROMPT = `You are a professional wrestling trading card cataloger. This app accepts only professional WRESTLING trading cards (WWE, AEW, NXT, WCW, TNA/Impact, ROH, NJPW, or another pro wrestling promotion).
 
-First inspect the image. For a clearly non-wrestling card return {"error":"unsupported_category"}. For an uncertain category return {"error":"category_unverified"}. Never relabel another sport as wrestling.
+The operator only uploads professional wrestling cards. Never refuse or return an error because of category. Set "category" to "wrestling" unless the card shows clear evidence of another sport (for example an NBA, NFL, MLB or NHL logo or team), in which case set "category" to "other_sport" and still read every field. Cards may be small on a large background, die-cut, sideways or upside down; read them anyway.
 
 Read every piece of text on the card. Wrestling cards often use metallic foil, holographic refractor patterns, or heavily stylized fonts — look carefully through any visual noise for the actual printed text. Serial numbering is often stamped in silver, gold, or white ink and may appear on any edge or corner.
 
@@ -231,13 +231,14 @@ const norm = t => String(t || '').replace(/[\u2122\u00ae\u00a9\u2120]/g, ' ').no
   .replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
 function groundName(meta) {
   if (!meta) return meta;
-  if (!meta.player_name) { meta.name_grounded = null; meta.player_name_unverified = null; meta.warnings = []; return meta; }
+  const keep = (Array.isArray(meta.warnings) ? meta.warnings : []).filter(w => w !== 'name_not_in_read_text');
+  if (!meta.player_name) { meta.name_grounded = null; meta.player_name_unverified = null; meta.warnings = keep; return meta; }
   const text = ` ${norm(meta.all_text)} `;
   const tokens = norm(meta.player_name).split(' ').filter(t => t.length >= 3);
   const grounded = tokens.length > 0 && tokens.every(t => text.includes(` ${t} `));
   meta.name_grounded = grounded;
   meta.player_name_unverified = grounded ? null : meta.player_name;
-  meta.warnings = grounded ? [] : ['name_not_in_read_text'];
+  meta.warnings = grounded ? keep : [...keep, 'name_not_in_read_text'];
   if (!grounded) meta.player_name = null;
   return meta;
 }
@@ -250,7 +251,8 @@ async function readOnce(provider, filePath, model, prompt) {
 
 /** Does this read suggest the image was not upright? */
 function looksMisoriented(meta) {
-  if (!meta || meta.parse_error || meta.error) return false;
+  if (!meta || meta.parse_error) return false;
+  if (meta.error) return CATEGORY_ERRORS.has(meta.error);
   const top = String(meta.text_top || 'up').toLowerCase();
   if (top !== 'up') return true;
   if (!meta.player_name) return true;
@@ -356,15 +358,24 @@ async function vlmReadMany(cards, opts = {}, onDone = () => {}) {
   await Promise.all(workers);
 }
 
+// Category doubt is a review flag, not a failure: the operator uploads only
+// wrestling cards, and hard rejection threw away 29/428 real wrestling cards
+// (die-cuts on large backgrounds, upside-down scans) in the first full batch.
+const CATEGORY_ERRORS = new Set(['unsupported_category', 'category_unverified']);
+const OTHER_SPORT = /^(NBA|NFL|MLB|NHL|UFC|MLS|baseball|basketball|football|hockey|soccer|MMA)$/i;
 function validateWrestling(meta) {
   if (!meta || typeof meta !== 'object' || Array.isArray(meta) || meta.parse_error) {
     return { error: 'invalid_identification_response', review_needed: true };
   }
-  if (meta.error) return { ...meta, review_needed: true };
-  if (meta.category !== 'wrestling' || /^(NBA|NFL|MLB|NHL|UFC|baseball|basketball|football|hockey|MMA)$/i.test(meta.promotion || '')) {
-    return { error: 'unsupported_or_unverified_category', review_needed: true };
+  if (meta.error && !CATEGORY_ERRORS.has(meta.error)) return { ...meta, review_needed: true };
+  const out = { ...meta, review_needed: true };
+  const warnings = [];
+  if (CATEGORY_ERRORS.has(meta.error)) { delete out.error; warnings.push('category_' + meta.error); }
+  if (out.category !== 'wrestling' || OTHER_SPORT.test(out.promotion || '')) {
+    warnings.push('category_not_confirmed_wrestling');
   }
-  return { ...meta, review_needed: true };
+  out.warnings = [...(Array.isArray(meta.warnings) ? meta.warnings : []), ...warnings];
+  return out;
 }
 
 module.exports = { groundName, retryDelay, looksMisoriented, PANEL_ROTATION, validateWrestling, vlmRead, vlmReadGated, vlmReadMany, whichProvider, status, scoreQuality, REVIEW_GATE };

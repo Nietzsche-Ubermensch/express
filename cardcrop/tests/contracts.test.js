@@ -25,9 +25,13 @@ test('worker result needs an actual PNG, not merely an existing file',()=>{
     fs.writeFileSync(file,'not an image');assert.throws(()=>readEnhancement(result,file));
   }finally{fs.rmSync(dir,{recursive:true});}
 });
-test('non-wrestling and uncertain identification are never accepted',()=>{
-  for(const meta of [null,[],{player_name:'Unknown'},{category:'baseball'},
-    {category:'wrestling',promotion:'NBA'},{parse_error:true}]) assert.ok(validateWrestling(meta).error);
+test('category doubt is flagged for review, never silently accepted or dropped',()=>{
+  for(const meta of [null,[],{parse_error:true}]) assert.ok(validateWrestling(meta).error);
+  for(const meta of [{player_name:'Unknown'},{category:'baseball'},{category:'wrestling',promotion:'NBA'},{error:'unsupported_category'}]){
+    const v=validateWrestling(meta);assert.equal(v.error,undefined);assert.equal(v.review_needed,true);
+    assert.ok(v.warnings.some(w=>w.startsWith('category_')),JSON.stringify(v));
+  }
   const good=validateWrestling({category:'wrestling',promotion:'AEW',player_name:'Kenny Omega'});
-  assert.equal(good.player_name,'Kenny Omega');assert.equal(good.review_needed,true);
+  assert.equal(good.player_name,'Kenny Omega');assert.equal(good.review_needed,true);assert.deepEqual(good.warnings,[]);
+  assert.equal(validateWrestling({error:'OpenAI 429: rate'}).error,'OpenAI 429: rate');
 });

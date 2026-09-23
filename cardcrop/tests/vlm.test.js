@@ -12,6 +12,7 @@ test('names absent from the transcription are demoted, not kept',()=>{
   const good=vlm.groundName({player_name:'Alex Windsor',all_text:'FIRST UD / ALEX WINDSOR / UD EXCLUSIVES® / 100/100'});
   assert.equal(good.player_name,'Alex Windsor');assert.equal(good.name_grounded,true);assert.equal(good.player_name_unverified,null);
   assert.equal(vlm.groundName({player_name:'Alex Windsor',all_text:'ALEX RUNS'}).player_name,null);
+  assert.deepEqual(vlm.groundName({player_name:'X Y',warnings:['category_not_confirmed_wrestling'],all_text:''}).warnings,['category_not_confirmed_wrestling','name_not_in_read_text']);
 });
 
 test('trademark and accent marks do not break grounding (real card 0819)',()=>{
@@ -36,6 +37,8 @@ test('looksMisoriented triggers only on sideways text or ungrounded names',()=>{
   assert.equal(vlm.looksMisoriented({text_top:'up',player_name:'Jade Cargill',all_text:'AEW 100/100'}),true);
   assert.equal(vlm.looksMisoriented({text_top:'up',player_name:null,all_text:'AEW'}),true);
   assert.equal(vlm.looksMisoriented({parse_error:true}),false);
+  assert.equal(vlm.looksMisoriented({error:'unsupported_category'}),true);
+  assert.equal(vlm.looksMisoriented({error:'OpenAI 429'}),false);
 });
 
 function mockOpenAI(dir,replies,seen){
