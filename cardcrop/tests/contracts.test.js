@@ -35,3 +35,14 @@ test('category doubt is flagged for review, never silently accepted or dropped',
   assert.equal(good.player_name,'Kenny Omega');assert.equal(good.review_needed,true);assert.deepEqual(good.warnings,[]);
   assert.equal(validateWrestling({error:'OpenAI 429: rate'}).error,'OpenAI 429: rate');
 });
+
+test('a card with no promotion and no wrestling-specific field is flagged, even if category says wrestling',()=>{
+  const v=validateWrestling({category:'wrestling',player_name:'Fred Dryer',manufacturer:'Leaf',set_name:'Pop Century'});
+  assert.equal(v.error,undefined);
+  assert.ok(v.warnings.includes('category_not_confirmed_wrestling'),JSON.stringify(v));
+});
+test('promotion alone, or any one wrestling-specific field, is enough to pass',()=>{
+  assert.deepEqual(validateWrestling({category:'wrestling',promotion:'AEW',player_name:'X'}).warnings,[]);
+  assert.deepEqual(validateWrestling({category:'wrestling',tag_team:'The Hardys',player_name:'X'}).warnings,[]);
+  assert.deepEqual(validateWrestling({category:'wrestling',championship:'AEW World Title',player_name:'X'}).warnings,[]);
+});
