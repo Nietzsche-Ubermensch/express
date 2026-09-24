@@ -376,6 +376,18 @@ async function vlmReadMany(cards, opts = {}, onDone = () => {}) {
 // (die-cuts on large backgrounds, upside-down scans) in the first full batch.
 const CATEGORY_ERRORS = new Set(['unsupported_category', 'category_unverified']);
 const OTHER_SPORT = /^(NBA|NFL|MLB|NHL|UFC|MLS|baseball|basketball|football|hockey|soccer|MMA)$/i;
+// A promotion string is the strongest wrestling signal, but not every real
+// wrestling card fills it in. Fields that ONLY exist on wrestling cards
+// (tag_team, stable, finishing_move, championship) are the fallback signal.
+// A card with none of the above slipped through as "wrestling" on real data:
+// a Leaf Pop Century autograph set (Fred Dryer/NFL, Rick Ross, Soleil Moon
+// Frye, Linda Blair) mixed into a wrestling scan batch had no promotion and
+// read cleanly, so category alone was not enough.
+const WRESTLING_FIELDS = ['tag_team', 'stable', 'finishing_move', 'championship'];
+function hasWrestlingSignal(out) {
+  if (out.promotion && !OTHER_SPORT.test(out.promotion)) return true;
+  return WRESTLING_FIELDS.some(k => out[k]);
+}
 function validateWrestling(meta) {
   if (!meta || typeof meta !== 'object' || Array.isArray(meta) || meta.parse_error) {
     return { error: 'invalid_identification_response', review_needed: true };
@@ -384,7 +396,7 @@ function validateWrestling(meta) {
   const out = { ...meta, review_needed: true };
   const warnings = [];
   if (CATEGORY_ERRORS.has(meta.error)) { delete out.error; warnings.push('category_' + meta.error); }
-  if (out.category !== 'wrestling' || OTHER_SPORT.test(out.promotion || '')) {
+  if (out.category !== 'wrestling' || OTHER_SPORT.test(out.promotion || '') || !hasWrestlingSignal(out)) {
     warnings.push('category_not_confirmed_wrestling');
   }
   out.warnings = [...(Array.isArray(meta.warnings) ? meta.warnings : []), ...warnings];
